@@ -3,6 +3,8 @@ use std::io::{Cursor, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::{io, thread};
 use byteorder::{BigEndian, ReadBytesExt};
+use crate::update_service;
+
 pub struct TcpProxy {
     pub forward_thread: thread::JoinHandle<()>,
 }
@@ -45,18 +47,26 @@ fn handle_client(mut stream_forward: TcpStream) {
     debug!("Initial buffer: {:?}", &initial_buffer[..n]);
     match decode_handshake_packet(&initial_buffer) {
         Ok(server_address) => {
-            println!("Server Address: {}", server_address);
-            let proxy_to: SocketAddr = "91.107.215.249:25577".parse().expect("Invalid address");
-            if let Ok(mut sender_forward) = TcpStream::connect(proxy_to) {
-                debug!("Connected to target server");
-                let mut sender_backward = sender_forward.try_clone().expect("Failed to clone stream");
-                let mut stream_backward = stream_forward.try_clone().expect("Failed to clone stream");
-                send_initial_buffer_to_target(&initial_buffer, n, &mut sender_forward);
-                spawn_client_to_target_thread(stream_forward, sender_forward);
-                spawn_target_to_client_thread(sender_backward, stream_backward);
-            } else {
-                error!("Failed to connect to target");
+            let mut adress = server_address.clone();
+            println!("Incoming request: [{}]", adress);
+
+            if let Some((ip, port)) = update_service::resolve(server_address) {
+                println!("Resolved destination [{}] -> [{}:{}]", adress, ip, port);
+                let proxy_to: SocketAddr = SocketAddr::new(ip.into(), port).into();
+                if let Ok(mut sender_forward) = TcpStream::connect(proxy_to) {
+                    debug!("Connected to target server");
+                    let mut sender_backward = sender_forward.try_clone().expect("Failed to clone stream");
+                    let mut stream_backward = stream_forward.try_clone().expect("Failed to clone stream");
+                    send_initial_buffer_to_target(&initial_buffer, n, &mut sender_forward);
+                    spawn_client_to_target_thread(stream_forward, sender_forward);
+                    spawn_target_to_client_thread(sender_backward, stream_backward);
+                } else {
+                    error!("Failed to connect to target");
+                }
+
             }
+
+
         },
         Err(e) => eprintln!("Failed to decode packet: {}", e),
     }
