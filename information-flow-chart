@@ -1,0 +1,93 @@
+                             +----------------------+
+                             |      main.rs         |
+                             +----------------------+
+                                      |
+                                      v
+                             +----------------------+
+                             |  logger::init_logger |
+                             +----------------------+
+                                      |
+                                      v
+                             +----------------------+
+                             | server::start_server |
+                             +----------------------+
+                                      |
+                                      v
+                      +-------------------------------------+
+                      | domain::{add_domain, remove_domain} |
+                      +-------------------------------------+
+                                      |
+                                      v
+                       +-------------------------------------+
+                       | server::handle_incoming_connections |
+                       +-------------------------------------+
+                                      |
+                                      v
+                            +---------------------------+
+                            | server::handle_connection |
+                            +---------------------------+
+                                      |
+         +------------------------------------------+-------------------------------------------+
+         |                                          |                                           |
+         v                                          v                                           v
++----------------------------------------+ +--------------------------------------+ +--------------------------------+
+| proxy::read_and_convert_proxy_protocol | | minecraft::parse_minecraft_handshake | | server::resolve_target_address |
++----------------------------------------+ +--------------------------------------+ +--------------------------------+
+         |                            |                                 |
+         v                            v                                 v
++----------------------------+ +-----------------------------+ +--------------------------+
+| proxy::send_proxy_protocol | | minecraft::read_packet_info | | minecraft::transfer_data |
++----------------------------+ +-----------------------------+ +--------------------------+
+         |                            |
+         v                            v
++-----------------------------------+ +-------------------------+
+| minecraft::check_connection_state | | minecraft::read_var_int |
++-----------------------------------+ +-------------------------+
+                                     |
+                                     v
+                           +------------------------+
+                           | minecraft::read_string |
+                           +------------------------+
+
+
+
+main.rs
+
+    Calls logger::init_logger() from logger.rs.
+    Calls server::start_server() from server.rs.
+    Calls domain::{add_domain, remove_domain} from domain.rs.
+    Calls server::handle_incoming_connections() from server.rs.
+
+logger.rs
+
+    Contains init_logger().
+
+server.rs
+
+    Contains start_server(), which sets up the server.
+    Contains handle_incoming_connections(), which listens for incoming connections and delegates handling to threads.
+    Calls handle_connection(), which processes each connection.
+    Calls resolve_target_address() to get the target server address.
+
+proxy.rs
+
+    Contains read_and_convert_proxy_protocol(), which reads and converts the proxy protocol header.
+    Contains send_proxy_protocol(), which sends the proxy protocol header to the target server.
+
+minecraft.rs
+
+    Contains parse_minecraft_handshake(), which parses the Minecraft handshake packet.
+    Contains read_packet_info(), which reads packet information.
+    Contains check_connection_state(), which checks the connection state.
+    Contains read_var_int(), which reads variable-length integers from the stream.
+    Contains read_string(), which reads strings from the stream.
+    Contains transfer_data(), which transfers data between streams.
+
+domain.rs
+
+    Contains add_domain(), which adds a domain to the mappings.
+    Contains remove_domain(), which removes a domain from the mappings.
+
+
+
+(hetzner-load-ballancer)------proxyprotv1------(this-proxy)--------proxyprotv2---------(minecraftserver/minecraftproxy)

@@ -1,0 +1,14 @@
+[package]
+name = "mineshieldv2-proxy"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+threadpool = "1.8.1"
+byteorder = "1.5.0"
+log = "0.4.22"
+env_logger = "0.11.5"
+tokio = { version = "1.0", features = ["full"] }
+
+[target.aarch64-unknown-linux-gnu]
+linker = "aarch64-linux-gnu-gcc"
