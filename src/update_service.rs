@@ -53,10 +53,10 @@ fn parse_target(target: &str) -> Result<(Ipv4Addr, u16), String> {
 }
 
 pub(crate) async fn update_proxies() {
-    println!("Attempting mysql connection...");
+    // println!("Attempting mysql connection...");
     let url = "mysql://root:00442266@127.0.0.1:3306/mineshield";
     let pool = Pool::new(url);
-    println!("Connected to mysql server!");
+    // println!("Connected to mysql server!");
     match fetch_domain_redirections(&pool).await {
         Ok(redirections) => {
             let mut new_map = HashMap::new();
@@ -70,7 +70,7 @@ pub(crate) async fn update_proxies() {
             }
             let mut map = PROXY_MAP.lock().unwrap();
             *map = new_map;
-            println!("Updated proxies");
+            // println!("Updated proxies");
         },
         Err(e) => println!("Failed to fetch redirections: {}", e),
     }

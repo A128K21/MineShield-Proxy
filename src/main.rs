@@ -11,7 +11,11 @@ use crate::proxy::TcpProxy;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
-
+    println!("█▀▄▀█ █ █▄░█ █▀▀ █▀ █░█ █ █▀▀ █░░ █▀▄ ░ ▀▄▀ █▄█ ▀█");
+    println!("█░▀░█ █ █░▀█ ██▄ ▄█ █▀█ █ ██▄ █▄▄ █▄▀ ▄ █░█ ░█░ █▄");
+    println!("// Recode, mysql enabled.");
+    println!("// Started on {}", "0.0.0.0:25565");
+    println!("//////////////////////////////////////////////////");
     TcpProxy::new();
     loop {
         // Your code here
@@ -20,12 +24,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Sleep for 10 seconds
         std::thread::sleep(Duration::from_secs(1));
 
-        if let Some((ip, port)) = update_service::resolve("localhost".parse().unwrap()) {
-            println!("Resolved localhost to {}:{}", ip, port);
-        }
-        if let Some((ip, port)) = update_service::resolve("google.com".parse().unwrap()) {
-            println!("Resolved google.com to {}:{}", ip, port);
-        }
     }
 
     Ok(())
