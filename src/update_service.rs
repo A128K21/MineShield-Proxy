@@ -54,7 +54,7 @@ fn parse_target(target: &str) -> Result<(Ipv4Addr, u16), String> {
 
 pub(crate) async fn update_proxies() {
     // println!("Attempting mysql connection...");
-    let url = "mysql://root:00442266@127.0.0.1:3306/mineshield";
+    let url = "mysql://root:mineshieldat2024@10.0.0.3:3306/mineshield";
     let pool = Pool::new(url);
     // println!("Connected to mysql server!");
     match fetch_domain_redirections(&pool).await {
