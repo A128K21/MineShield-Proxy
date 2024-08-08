@@ -2,9 +2,9 @@ name: Rust
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "master" ]
   pull_request:
-    branches: [ "main" ]
+    branches: [ "master" ]
 
 env:
   CARGO_TERM_COLOR: always
@@ -17,6 +17,39 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     - name: Build
-      run: cargo build --verbose
-    - name: Run tests
-      run: cargo test --verbose
+      run: cargo build --release
+    
+
+
+    - name: Package
+      run: zip -j mineshield.zip target/release/mineshield-xyz
+
+    # Check if the current commit is tagged
+    - name: Check Tag
+      id: check_tag
+      run: echo "TAG_NAME=$(git tag --points-at HEAD)" >> $GITHUB_ENV
+      shell: bash
+
+    # Create or use the existing Tag
+    - name: Create Tag if none
+      if: env.TAG_NAME == ''
+      run: |
+        NEW_TAG="v$(date +'%Y.%m.%d.%H%M%S')"  # Example tag format: v2023.04.29.153000
+        git tag $NEW_TAG
+        echo "NEW_TAG=$NEW_TAG" >> $GITHUB_ENV
+        echo "TAG_CREATED=true" >> $GITHUB_ENV
+    # Create Release new
+    - name: Create Release
+      uses: softprops/action-gh-release@v1
+      if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+      with:
+        files: mineshield.zip
+        tag_name: ${{ env.TAG_NAME || env.NEW_TAG }}
+        draft: false
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    # This step will print the URL of the newly created release
+    - name: Get the URL of the created Release
+      run: echo "Release URL is ${{ steps.create_release.outputs.upload_url }}"
