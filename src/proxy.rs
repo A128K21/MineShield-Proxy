@@ -3,38 +3,41 @@ use std::io::{Cursor, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::{io, thread};
 use byteorder::{BigEndian, ReadBytesExt};
+use proxy_protocol::{
+    version2::{ProxyAddresses, ProxyCommand, ProxyTransportProtocol},
+    ProxyHeader,
+};
+use bytes::BufMut;
 use crate::update_service;
+
+
 
 pub struct TcpProxy {
     pub forward_thread: thread::JoinHandle<()>,
 }
-/// --------------------------------
-// CREATE PROXY INSTANCE
-/// --------------------------------
+
 impl TcpProxy {
+    /// Creates a new TcpProxy instance and starts listening on port 25565
     pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
-        // Bind the proxy to listen on port 25565
         let listener_forward = TcpListener::bind(("0.0.0.0", 25565))?;
         info!("Starting proxy on port 25565");
-        // Spawn a new thread to handle incoming connections
+
         let forward_thread = thread::spawn(move || {
             loop {
                 match listener_forward.accept() {
                     Ok((stream_forward, _addr)) => {
-                        //drop(stream_forward);
-                        debug!("New connection");
                         handle_client(stream_forward);
                     }
                     Err(e) => error!("Failed to accept connection: {}", e),
                 }
             }
         });
+
         Ok(Self { forward_thread })
     }
 }
-/// --------------------------------
-// INCOMING CONNECTIONS / PREPROCESS INITIAL PACKET
-/// --------------------------------
+
+/// Handles an incoming client connection, reads the initial packet, and forwards it to the target server
 fn handle_client(mut stream_forward: TcpStream) {
     let mut initial_buffer = vec![0; 1024];
     let n = match stream_forward.read(&mut initial_buffer) {
@@ -44,43 +47,119 @@ fn handle_client(mut stream_forward: TcpStream) {
             return;
         }
     };
-    debug!("Initial buffer: {:?}", &initial_buffer[..n]);
+
     match decode_handshake_packet(&initial_buffer) {
         Ok(server_address) => {
-            let mut adress = server_address.clone();
-            println!("Incoming request: [{}]", adress);
-
             if let Some((ip, port)) = update_service::resolve(server_address) {
-                println!("Resolved destination [{}] -> [{}:{}]", adress, ip, port);
-                let proxy_to: SocketAddr = SocketAddr::new(ip.into(), port).into();
+                let proxy_to: SocketAddr = SocketAddr::new(ip.into(), port);
                 if let Ok(mut sender_forward) = TcpStream::connect(proxy_to) {
-                    debug!("Connected to target server");
                     let mut sender_backward = sender_forward.try_clone().expect("Failed to clone stream");
                     let mut stream_backward = stream_forward.try_clone().expect("Failed to clone stream");
-                    send_initial_buffer_to_target(&initial_buffer, n, &mut sender_forward);
+
+                    // Create and send Proxy Protocol header along with initial buffer
+                    if let (Ok(src_addr), Ok(dst_addr)) = (stream_forward.peer_addr(), sender_forward.peer_addr()) {
+                        let new_buffer = encapsulate_with_proxy_protocol(src_addr, dst_addr, &initial_buffer[..n]);
+                        send_initial_buffer_to_target(&new_buffer, &mut sender_forward);
+                    }
+
+                    // Spawn threads for handling communication between client and server
                     spawn_client_to_target_thread(stream_forward, sender_forward);
                     spawn_target_to_client_thread(sender_backward, stream_backward);
                 } else {
                     error!("Failed to connect to target");
                 }
-
             }
-
-
-        },
-        Err(e) => eprintln!("Failed to decode packet: {}", e),
+        }
+        Err(e) => error!("Failed to decode packet: {}", e),
     }
 }
-/// --------------------------------
-// MINECRAFT PROTOCOL
-/// --------------------------------
-/// Reads a VarInt from the cursor, handling variable-length integers used in Minecraft protocol.
+
+/// Encodes the Proxy Protocol v2 header
+fn encode_proxy_protocol_v2_header(src_addr: SocketAddr, dst_addr: SocketAddr) -> Vec<u8> {
+    let proxy_addr = match (src_addr, dst_addr) {
+        (SocketAddr::V4(source), SocketAddr::V4(destination)) => ProxyAddresses::Ipv4 { source, destination },
+        _ => unreachable!(),
+    };
+
+    proxy_protocol::encode(ProxyHeader::Version2 {
+        command: ProxyCommand::Proxy,
+        transport_protocol: ProxyTransportProtocol::Stream,
+        addresses: proxy_addr,
+    })
+        .unwrap()
+        .to_vec()
+}
+
+/// Encapsulates the initial data with the Proxy Protocol header
+fn encapsulate_with_proxy_protocol(src_addr: SocketAddr, dst_addr: SocketAddr, data: &[u8]) -> Vec<u8> {
+    let header = encode_proxy_protocol_v2_header(src_addr, dst_addr);
+    let mut new_buffer = Vec::with_capacity(header.len() + data.len());
+    new_buffer.extend_from_slice(&header);
+    new_buffer.extend_from_slice(data);
+    new_buffer
+}
+
+/// Sends the initial buffer to the target server
+fn send_initial_buffer_to_target(initial_buffer: &[u8], sender_forward: &mut TcpStream) {
+    if sender_forward.write_all(initial_buffer).is_err() || sender_forward.flush().is_err() {
+        error!("Failed to send initial buffer to target");
+    }
+}
+
+/// Handles data forwarding from client to server
+fn spawn_client_to_target_thread(mut stream_forward: TcpStream, mut sender_forward: TcpStream) {
+    thread::spawn(move || {
+        let mut buffer = vec![0; 1024];
+        loop {
+            match stream_forward.read(&mut buffer) {
+                Ok(n) if n > 0 => {
+                    if sender_forward.write_all(&buffer[..n]).is_err() || sender_forward.flush().is_err() {
+                        error!("Failed to forward data to target");
+                        break;
+                    }
+                }
+                Ok(_) => {
+                    break;
+                }
+                Err(e) => {
+                    error!("Failed to read from client: {}", e);
+                    break;
+                }
+            }
+        }
+    });
+}
+
+/// Handles data forwarding from server to client
+fn spawn_target_to_client_thread(mut sender_backward: TcpStream, mut stream_backward: TcpStream) {
+    thread::spawn(move || {
+        let mut buffer = vec![0; 2048]; // Increased buffer size for larger packets
+        loop {
+            match sender_backward.read(&mut buffer) {
+                Ok(n) if n > 0 => {
+                    if stream_backward.write_all(&buffer[..n]).is_err() || stream_backward.flush().is_err() {
+                        error!("Failed to forward data to client");
+                        break;
+                    }
+                }
+                Ok(_) => {
+                    break;
+                }
+                Err(e) => {
+                    error!("Failed to read from target: {}", e);
+                    break;
+                }
+            }
+        }
+    });
+}
+
+/// Reads a VarInt from the cursor, handling variable-length integers used in Minecraft protocol
 fn read_varint(cursor: &mut Cursor<&[u8]>) -> io::Result<i32> {
     let mut num_read = 0;
     let mut result = 0;
-    let mut read: u8;
     loop {
-        read = cursor.read_u8()?;
+        let read = cursor.read_u8()?;
         let value = (read & 0b01111111) as i32;
         result |= value << (7 * num_read);
         num_read += 1;
@@ -93,101 +172,23 @@ fn read_varint(cursor: &mut Cursor<&[u8]>) -> io::Result<i32> {
     }
     Ok(result)
 }
-/// Reads a UTF-8 string from the cursor, using a VarInt length prefix.
+
+/// Reads a UTF-8 string from the cursor, using a VarInt length prefix
 fn read_string(cursor: &mut Cursor<&[u8]>) -> io::Result<String> {
     let length = read_varint(cursor)? as usize;
     let mut buffer = vec![0; length];
     cursor.read_exact(&mut buffer)?;
     Ok(String::from_utf8(buffer).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?)
 }
-/// Decodes the handshake packet to extract the server address.
+
+/// Decodes the handshake packet to extract the server address
 fn decode_handshake_packet(buffer: &[u8]) -> io::Result<String> {
     let mut cursor = Cursor::new(buffer);
-    // Skip reading length and packet ID as we are only interested in the server address
-    let _ = read_varint(&mut cursor)?;
-    let _ = read_varint(&mut cursor)?;
-    let _ = read_varint(&mut cursor)?;
+    let _ = read_varint(&mut cursor)?; // Packet length
+    let _ = read_varint(&mut cursor)?; // Packet ID
+    let _ = read_varint(&mut cursor)?; // Protocol version
     let server_address = read_string(&mut cursor)?;
-    let _ = cursor.read_u16::<BigEndian>()?;
-    let _ = read_varint(&mut cursor)?;
+    let _ = cursor.read_u16::<BigEndian>()?; // Server port
+    let _ = read_varint(&mut cursor)?; // Next state
     Ok(server_address)
-}
-/// --------------------------------
-// SENDING INITIAL PACKET TO SERVER
-/// --------------------------------
-
-fn send_initial_buffer_to_target(initial_buffer: &[u8], n: usize, sender_forward: &mut TcpStream) {
-    if sender_forward.write_all(&initial_buffer[..n]).is_err() {
-        error!("Failed to write initial buffer to target");
-        return;
-    }
-    if sender_forward.flush().is_err() {
-        error!("Failed to flush initial buffer to target");
-    }
-}
-/// --------------------------------
-// LIVE CONNECTION HANDLING CLIENT TO SERVER
-/// --------------------------------
-/// Spawns a thread to handle communication from the client to the target server.
-fn spawn_client_to_target_thread(mut stream_forward: TcpStream, mut sender_forward: TcpStream) {
-    thread::spawn(move || {
-        let mut buffer = vec![0; 1024];
-        let mut initial_data_sent = false;
-        loop {
-            let n = if initial_data_sent {
-                match stream_forward.read(&mut buffer) {
-                    Ok(n) => n,
-                    Err(e) => {
-                        error!("Failed to read from client: {}", e);
-                        break;
-                    }
-                }
-            } else {
-                initial_data_sent = true;
-                buffer.len()
-            };
-            if n == 0 {
-                debug!("Client closed connection");
-                break;
-            }
-            if sender_forward.write_all(&buffer[..n]).is_err() {
-                error!("Failed to write to target");
-                break;
-            }
-            if sender_forward.flush().is_err() {
-                error!("Failed to flush to target");
-                break;
-            }
-        }
-    });
-}
-/// --------------------------------
-// LIVE CONNECTION HANDLING SERVER TO CLIENT
-/// --------------------------------
-/// Spawns a thread to handle communication from the target server to the client.
-fn spawn_target_to_client_thread(mut sender_backward: TcpStream, mut stream_backward: TcpStream) {
-    thread::spawn(move || {
-        let mut buffer = vec![0; 1024];
-        loop {
-            let n = match sender_backward.read(&mut buffer) {
-                Ok(n) => n,
-                Err(e) => {
-                    error!("Failed to read from target: {}", e);
-                    break;
-                }
-            };
-            if n == 0 {
-                debug!("Target closed connection");
-                break;
-            }
-            if stream_backward.write_all(&buffer[..n]).is_err() {
-                error!("Failed to write to client");
-                break;
-            }
-            if stream_backward.flush().is_err() {
-                error!("Failed to flush to client");
-                break;
-            }
-        }
-    });
 }

@@ -13,7 +13,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
     println!("█▀▄▀█ █ █▄░█ █▀▀ █▀ █░█ █ █▀▀ █░░ █▀▄ ░ ▀▄▀ █▄█ ▀█");
     println!("█░▀░█ █ █░▀█ ██▄ ▄█ █▀█ █ ██▄ █▄▄ █▄▀ ▄ █░█ ░█░ █▄");
-    println!("// Recode, mysql enabled.");
     println!("// Started on {}", "0.0.0.0:25565");
     println!("//////////////////////////////////////////////////");
     TcpProxy::new();
