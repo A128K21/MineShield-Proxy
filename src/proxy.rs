@@ -104,6 +104,7 @@ fn send_initial_buffer_to_target(initial_buffer: &[u8], sender_forward: &mut Tcp
     if sender_forward.write_all(initial_buffer).is_err() || sender_forward.flush().is_err() {
         error!("Failed to send initial buffer to target");
     }
+    drop(initial_buffer)
 }
 
 /// Handles data forwarding from client to server
@@ -126,7 +127,7 @@ fn spawn_client_to_target_thread(mut stream_forward: TcpStream, mut sender_forwa
                     break;
                 }
             }
-        }
+        } drop(buffer)
     });
 }
 
@@ -151,6 +152,7 @@ fn spawn_target_to_client_thread(mut sender_backward: TcpStream, mut stream_back
                 }
             }
         }
+        drop(buffer)
     });
 }
 
