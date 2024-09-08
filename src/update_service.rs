@@ -1,12 +1,10 @@
-use log::info;
 use std::collections::HashMap;
 use std::net::{ToSocketAddrs, Ipv4Addr, SocketAddrV4};
 use std::sync::Mutex;
-use tokio::time::{self, Duration};
 use lazy_static::lazy_static;
 use mysql_async::{Pool, Row};
 use mysql_async::prelude::*;
-use dns_lookup::lookup_host;
+
 
 lazy_static! {
     static ref PROXY_MAP: Mutex<HashMap<String, (Ipv4Addr, u16)>> = Mutex::new(HashMap::new());
