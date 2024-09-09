@@ -1,6 +1,6 @@
 use log::{debug, error, info};
 use std::io::{Cursor, Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::{io, thread};
 use byteorder::{BigEndian, ReadBytesExt};
 use proxy_protocol::{
@@ -28,6 +28,19 @@ impl TcpProxy {
             loop {
                 match listener_forward.accept() {
                     Ok((stream_forward, _addr)) => {
+                        let src_ip = _addr.ip();
+
+                        // Perform IP-based filtering before handling the connection
+                        // Check if the IP is allowed; close the connection immediately if not
+                        if is_ip_blocked(&src_ip) {
+                            // info!("Connection from {} denied by IP filter", src_ip);
+                            // Set a short timeout before closing to minimize resource usage
+                            let _ = stream_forward.set_read_timeout(Some(std::time::Duration::from_secs(1)));
+                            let _ = stream_forward.set_write_timeout(Some(std::time::Duration::from_secs(1)));
+                            let _ = stream_forward.shutdown(std::net::Shutdown::Both);
+                            continue; // Skip spawning a thread for denied IPs
+                        }
+
                         // Use the thread pool to handle the client connection
                         pool.spawn(|| handle_client(stream_forward));
                     }
@@ -40,8 +53,36 @@ impl TcpProxy {
     }
 }
 
+
+/// IP BLACKLISTING
+/// Function to determine if an IP address is allowed
+fn is_ip_blocked(src_ip: &std::net::IpAddr) -> bool {
+    // Example filtering logic: Allow only specific IPs, ranges, or subnets
+    // Replace this logic with your own IP filtering rules
+    false
+}
+
+
+fn to_domain_filter(src_ip: &std::net::IpAddr, domain: &str) -> bool {
+    // Example filtering logic: Allow only specific IPs, ranges, or subnets
+    // Replace this logic with your own IP filtering rules
+    false
+}
+
+
+
 /// Handles an incoming client connection, reads the initial packet, and forwards it to the target server
 fn handle_client(mut stream_forward: TcpStream) {
+    // BLOCK BLACKLISTED CONNECTIONS
+    let src_ip = match stream_forward.peer_addr() {
+        Ok(addr) => addr.ip(),
+        Err(e) => {
+            error!("Failed to get peer address: {}", e);
+            let _ = stream_forward.shutdown(std::net::Shutdown::Both);
+            return;
+        }
+    };
+
     let mut initial_buffer = vec![0; 1024];
     let n = match stream_forward.read(&mut initial_buffer) {
         Ok(n) => n,
@@ -53,11 +94,22 @@ fn handle_client(mut stream_forward: TcpStream) {
 
     match decode_handshake_packet(&initial_buffer) {
         Ok(server_address) => {
+            // Clone the server_address for use in domain filtering and logging
+            let server_address_clone = server_address.clone();
+
             if let Some((ip, port)) = update_service::resolve(server_address) {
                 let proxy_to: SocketAddr = SocketAddr::new(ip.into(), port);
+
+                // Perform combined IP and domain filtering by passing a reference
+                if to_domain_filter(&src_ip, &server_address_clone) {
+                    info!("Connection from {} to {} denied by filter", src_ip, server_address_clone);
+                    let _ = stream_forward.shutdown(std::net::Shutdown::Both);
+                    return;
+                }
+
                 if let Ok(mut sender_forward) = TcpStream::connect(proxy_to) {
-                    let mut sender_backward = sender_forward.try_clone().expect("Failed to clone stream");
-                    let mut stream_backward = stream_forward.try_clone().expect("Failed to clone stream");
+                    let sender_backward = sender_forward.try_clone().expect("Failed to clone stream");
+                    let stream_backward = stream_forward.try_clone().expect("Failed to clone stream");
 
                     // Create and send Proxy Protocol header along with initial buffer
                     if let (Ok(src_addr), Ok(dst_addr)) = (stream_forward.peer_addr(), sender_forward.peer_addr()) {
@@ -75,6 +127,8 @@ fn handle_client(mut stream_forward: TcpStream) {
         }
         Err(e) => error!("Failed to decode packet: {}", e),
     }
+
+
 }
 
 /// Encodes the Proxy Protocol v2 header
