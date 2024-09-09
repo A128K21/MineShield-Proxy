@@ -9,7 +9,7 @@ use proxy_protocol::{
 };
 use bytes::BufMut;
 use crate::update_service;
-
+use rayon::ThreadPoolBuilder;
 
 
 pub struct TcpProxy {
@@ -17,16 +17,19 @@ pub struct TcpProxy {
 }
 
 impl TcpProxy {
-    /// Creates a new TcpProxy instance and starts listening on port 25565
     pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
         let listener_forward = TcpListener::bind(("0.0.0.0", 25565))?;
         info!("Starting proxy on port 25565");
+
+        // Create a thread pool with a limited number of threads
+        let pool = ThreadPoolBuilder::new().num_threads(16).build().unwrap();
 
         let forward_thread = thread::spawn(move || {
             loop {
                 match listener_forward.accept() {
                     Ok((stream_forward, _addr)) => {
-                        handle_client(stream_forward);
+                        // Use the thread pool to handle the client connection
+                        pool.spawn(|| handle_client(stream_forward));
                     }
                     Err(e) => error!("Failed to accept connection: {}", e),
                 }
@@ -107,7 +110,6 @@ fn send_initial_buffer_to_target(initial_buffer: &[u8], sender_forward: &mut Tcp
     drop(initial_buffer)
 }
 
-/// Handles data forwarding from client to server
 fn spawn_client_to_target_thread(mut stream_forward: TcpStream, mut sender_forward: TcpStream) {
     thread::spawn(move || {
         let mut buffer = vec![0; 1024];
@@ -127,14 +129,14 @@ fn spawn_client_to_target_thread(mut stream_forward: TcpStream, mut sender_forwa
                     break;
                 }
             }
-        } drop(buffer)
+        }
+        let _ = sender_forward.shutdown(std::net::Shutdown::Write); // Shutdown write to signal end of data
     });
 }
 
-/// Handles data forwarding from server to client
 fn spawn_target_to_client_thread(mut sender_backward: TcpStream, mut stream_backward: TcpStream) {
     thread::spawn(move || {
-        let mut buffer = vec![0; 2048]; // Increased buffer size for larger packets
+        let mut buffer = vec![0; 2048];
         loop {
             match sender_backward.read(&mut buffer) {
                 Ok(n) if n > 0 => {
@@ -152,7 +154,7 @@ fn spawn_target_to_client_thread(mut sender_backward: TcpStream, mut stream_back
                 }
             }
         }
-        drop(buffer)
+        let _ = stream_backward.shutdown(std::net::Shutdown::Write); // Shutdown write to signal end of data
     });
 }
 
