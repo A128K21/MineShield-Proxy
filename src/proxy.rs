@@ -1,17 +1,24 @@
 use log::{debug, error, info};
 use std::io::{Cursor, Read, Write};
-use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::{io, thread};
+use std::collections::{HashMap, HashSet};
 use byteorder::{BigEndian, ReadBytesExt};
 use proxy_protocol::{
     version2::{ProxyAddresses, ProxyCommand, ProxyTransportProtocol},
     ProxyHeader,
 };
 use bytes::BufMut;
+use lazy_static::lazy_static;
 use crate::update_service;
 use rayon::ThreadPoolBuilder;
+use tokio::sync::Mutex;
 
+lazy_static! {
 
+    // static ref DOMAIN_COUNTERS: HashMap<str, usize> = HashMap::new();
+    // static ref BLOCKED_IPS: HashSet<Ipv4Addr> = HashSet::new();
+}
 pub struct TcpProxy {
     pub forward_thread: thread::JoinHandle<()>,
 }
