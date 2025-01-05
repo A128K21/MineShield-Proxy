@@ -1,5 +1,7 @@
+A minecraft proxy written in rust.
 
 
 MYSQL STRUCTURE
-![kép](https://github.com/user-attachments/assets/0cbb8a93-e9a0-4832-8ab8-ad8df4a0e133)
+rd_database/domain_redirections
+![kép](https://github.com/user-attachments/assets/83dcda67-353f-43da-b584-178f316d810b)
 .
