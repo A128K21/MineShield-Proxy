@@ -1,6 +1,6 @@
 use log::{debug, error, info};
 use std::io::{Cursor, Read, Write};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::{io, thread};
 use std::collections::{HashMap, HashSet};
 use byteorder::{BigEndian, ReadBytesExt};
@@ -9,16 +9,11 @@ use proxy_protocol::{
     ProxyHeader,
 };
 use bytes::BufMut;
-use lazy_static::lazy_static;
-use crate::update_service;
 use rayon::ThreadPoolBuilder;
-use tokio::sync::Mutex;
 
-lazy_static! {
+// Import functions and types from update_service.
+use crate::update_service::{resolve, try_register_connection, ConnectionGuard, PROXY_THREADS};
 
-    // static ref DOMAIN_COUNTERS: HashMap<str, usize> = HashMap::new();
-    // static ref BLOCKED_IPS: HashSet<Ipv4Addr> = HashSet::new();
-}
 pub struct TcpProxy {
     pub forward_thread: thread::JoinHandle<()>,
 }
@@ -28,27 +23,21 @@ impl TcpProxy {
         let listener_forward = TcpListener::bind(("0.0.0.0", 25565))?;
         info!("Starting proxy on port 25565");
 
-        // Create a thread pool with a limited number of threads
-        let pool = ThreadPoolBuilder::new().num_threads(16).build().unwrap();
+        // Use the proxy_threads value from the configuration.
+        let num_threads = *PROXY_THREADS.lock().unwrap();
+        let pool = ThreadPoolBuilder::new().num_threads(num_threads).build().unwrap();
 
         let forward_thread = thread::spawn(move || {
             loop {
                 match listener_forward.accept() {
                     Ok((stream_forward, _addr)) => {
                         let src_ip = _addr.ip();
-
-                        // Perform IP-based filtering before handling the connection
-                        // Check if the IP is allowed; close the connection immediately if not
                         if is_ip_blocked(&src_ip) {
-                            // info!("Connection from {} denied by IP filter", src_ip);
-                            // Set a short timeout before closing to minimize resource usage
                             let _ = stream_forward.set_read_timeout(Some(std::time::Duration::from_secs(1)));
                             let _ = stream_forward.set_write_timeout(Some(std::time::Duration::from_secs(1)));
-                            let _ = stream_forward.shutdown(std::net::Shutdown::Both);
-                            continue; // Skip spawning a thread for denied IPs
+                            let _ = stream_forward.shutdown(Shutdown::Both);
+                            continue;
                         }
-
-                        // Use the thread pool to handle the client connection
                         pool.spawn(|| handle_client(stream_forward));
                     }
                     Err(e) => error!("Failed to accept connection: {}", e),
@@ -60,32 +49,23 @@ impl TcpProxy {
     }
 }
 
-
-/// IP BLACKLISTING
-/// Function to determine if an IP address is allowed
-fn is_ip_blocked(src_ip: &std::net::IpAddr) -> bool {
-    // Example filtering logic: Allow only specific IPs, ranges, or subnets
-    // Replace this logic with your own IP filtering rules
+/// Dummy IP filtering function. Replace with your own rules.
+fn is_ip_blocked(src_ip: &IpAddr) -> bool {
     false
 }
 
-
-fn to_domain_filter(src_ip: &std::net::IpAddr, domain: &str) -> bool {
-    // Example filtering logic: Allow only specific IPs, ranges, or subnets
-    // Replace this logic with your own IP filtering rules
+/// Dummy domain filter. Replace with your own logic.
+fn to_domain_filter(_src_ip: &IpAddr, _domain: &str) -> bool {
     false
 }
 
-
-
-/// Handles an incoming client connection, reads the initial packet, and forwards it to the target server
+/// Handles an incoming client connection.
 fn handle_client(mut stream_forward: TcpStream) {
-    // BLOCK BLACKLISTED CONNECTIONS
     let src_ip = match stream_forward.peer_addr() {
         Ok(addr) => addr.ip(),
         Err(e) => {
             error!("Failed to get peer address: {}", e);
-            let _ = stream_forward.shutdown(std::net::Shutdown::Both);
+            let _ = stream_forward.shutdown(Shutdown::Both);
             return;
         }
     };
@@ -94,51 +74,53 @@ fn handle_client(mut stream_forward: TcpStream) {
     let n = match stream_forward.read(&mut initial_buffer) {
         Ok(n) => n,
         Err(e) => {
-            error!("Failed to read from the stream: {}", e);
+            error!("Failed to read from stream: {}", e);
             return;
         }
     };
 
     match decode_handshake_packet(&initial_buffer) {
         Ok(server_address) => {
-            // Clone the server_address for use in domain filtering and logging
             let server_address_clone = server_address.clone();
 
-            if let Some((ip, port)) = update_service::resolve(server_address) {
-                let proxy_to: SocketAddr = SocketAddr::new(ip.into(), port);
+            if let Some((ip, port)) = resolve(server_address) {
+                if let Some(guard) = try_register_connection(&server_address_clone) {
+                    let proxy_to: SocketAddr = SocketAddr::new(ip.into(), port);
 
-                // Perform combined IP and domain filtering by passing a reference
-                if to_domain_filter(&src_ip, &server_address_clone) {
-                    info!("Connection from {} to {} denied by filter", src_ip, server_address_clone);
-                    let _ = stream_forward.shutdown(std::net::Shutdown::Both);
-                    return;
-                }
-
-                if let Ok(mut sender_forward) = TcpStream::connect(proxy_to) {
-                    let sender_backward = sender_forward.try_clone().expect("Failed to clone stream");
-                    let stream_backward = stream_forward.try_clone().expect("Failed to clone stream");
-
-                    // Create and send Proxy Protocol header along with initial buffer
-                    if let (Ok(src_addr), Ok(dst_addr)) = (stream_forward.peer_addr(), sender_forward.peer_addr()) {
-                        let new_buffer = encapsulate_with_proxy_protocol(src_addr, dst_addr, &initial_buffer[..n]);
-                        send_initial_buffer_to_target(&new_buffer, &mut sender_forward);
+                    if to_domain_filter(&src_ip, &server_address_clone) {
+                        info!("Connection from {} to {} denied by filter", src_ip, server_address_clone);
+                        let _ = stream_forward.shutdown(Shutdown::Both);
+                        return;
                     }
 
-                    // Spawn threads for handling communication between client and server
-                    spawn_client_to_target_thread(stream_forward, sender_forward);
-                    spawn_target_to_client_thread(sender_backward, stream_backward);
+                    if let Ok(mut sender_forward) = TcpStream::connect(proxy_to) {
+                        let sender_backward = sender_forward.try_clone().expect("Failed to clone stream");
+                        let stream_backward = stream_forward.try_clone().expect("Failed to clone stream");
+
+                        if let (Ok(src_addr), Ok(dst_addr)) = (stream_forward.peer_addr(), sender_forward.peer_addr()) {
+                            let new_buffer = encapsulate_with_proxy_protocol(src_addr, dst_addr, &initial_buffer[..n]);
+                            send_initial_buffer_to_target(&new_buffer, &mut sender_forward);
+                        }
+
+                        let guard_client = guard.clone();
+                        let guard_target = guard.clone();
+                        spawn_client_to_target_thread(stream_forward, sender_forward, guard_client);
+                        spawn_target_to_client_thread(sender_backward, stream_backward, guard_target);
+                    } else {
+                        error!("Failed to connect to target");
+                    }
                 } else {
-                    error!("Failed to connect to target");
+                    info!("Rate limit exceeded for target {}", server_address_clone);
+                    let _ = stream_forward.shutdown(Shutdown::Both);
+                    return;
                 }
             }
         }
         Err(e) => error!("Failed to decode packet: {}", e),
     }
-
-
 }
 
-/// Encodes the Proxy Protocol v2 header
+/// Encodes the Proxy Protocol v2 header.
 fn encode_proxy_protocol_v2_header(src_addr: SocketAddr, dst_addr: SocketAddr) -> Vec<u8> {
     let proxy_addr = match (src_addr, dst_addr) {
         (SocketAddr::V4(source), SocketAddr::V4(destination)) => ProxyAddresses::Ipv4 { source, destination },
@@ -154,7 +136,7 @@ fn encode_proxy_protocol_v2_header(src_addr: SocketAddr, dst_addr: SocketAddr) -
         .to_vec()
 }
 
-/// Encapsulates the initial data with the Proxy Protocol header
+/// Encapsulates the initial data with the Proxy Protocol header.
 fn encapsulate_with_proxy_protocol(src_addr: SocketAddr, dst_addr: SocketAddr, data: &[u8]) -> Vec<u8> {
     let header = encode_proxy_protocol_v2_header(src_addr, dst_addr);
     let mut new_buffer = Vec::with_capacity(header.len() + data.len());
@@ -163,15 +145,16 @@ fn encapsulate_with_proxy_protocol(src_addr: SocketAddr, dst_addr: SocketAddr, d
     new_buffer
 }
 
-/// Sends the initial buffer to the target server
+/// Sends the initial buffer to the target.
 fn send_initial_buffer_to_target(initial_buffer: &[u8], sender_forward: &mut TcpStream) {
     if sender_forward.write_all(initial_buffer).is_err() || sender_forward.flush().is_err() {
         error!("Failed to send initial buffer to target");
     }
-    drop(initial_buffer)
 }
 
-fn spawn_client_to_target_thread(mut stream_forward: TcpStream, mut sender_forward: TcpStream) {
+/// Spawns a thread to forward data from the client to the target.
+/// The passed `_guard` is held until the thread ends.
+fn spawn_client_to_target_thread(mut stream_forward: TcpStream, mut sender_forward: TcpStream, _guard: std::sync::Arc<ConnectionGuard>) {
     thread::spawn(move || {
         let mut buffer = vec![0; 1024];
         loop {
@@ -182,20 +165,20 @@ fn spawn_client_to_target_thread(mut stream_forward: TcpStream, mut sender_forwa
                         break;
                     }
                 }
-                Ok(_) => {
-                    break;
-                }
+                Ok(_) => break,
                 Err(e) => {
                     error!("Failed to read from client: {}", e);
                     break;
                 }
             }
         }
-        let _ = sender_forward.shutdown(std::net::Shutdown::Write); // Shutdown write to signal end of data
+        let _ = sender_forward.shutdown(Shutdown::Write);
     });
 }
 
-fn spawn_target_to_client_thread(mut sender_backward: TcpStream, mut stream_backward: TcpStream) {
+/// Spawns a thread to forward data from the target back to the client.
+/// The passed `_guard` is held until the thread ends.
+fn spawn_target_to_client_thread(mut sender_backward: TcpStream, mut stream_backward: TcpStream, _guard: std::sync::Arc<ConnectionGuard>) {
     thread::spawn(move || {
         let mut buffer = vec![0; 2048];
         loop {
@@ -206,20 +189,18 @@ fn spawn_target_to_client_thread(mut sender_backward: TcpStream, mut stream_back
                         break;
                     }
                 }
-                Ok(_) => {
-                    break;
-                }
+                Ok(_) => break,
                 Err(e) => {
                     error!("Failed to read from target: {}", e);
                     break;
                 }
             }
         }
-        let _ = stream_backward.shutdown(std::net::Shutdown::Write); // Shutdown write to signal end of data
+        let _ = stream_backward.shutdown(Shutdown::Write);
     });
 }
 
-/// Reads a VarInt from the cursor, handling variable-length integers used in Minecraft protocol
+/// Reads a VarInt from the cursor.
 fn read_varint(cursor: &mut Cursor<&[u8]>) -> io::Result<i32> {
     let mut num_read = 0;
     let mut result = 0;
@@ -238,15 +219,15 @@ fn read_varint(cursor: &mut Cursor<&[u8]>) -> io::Result<i32> {
     Ok(result)
 }
 
-/// Reads a UTF-8 string from the cursor, using a VarInt length prefix
+/// Reads a UTF-8 string from the cursor.
 fn read_string(cursor: &mut Cursor<&[u8]>) -> io::Result<String> {
     let length = read_varint(cursor)? as usize;
     let mut buffer = vec![0; length];
     cursor.read_exact(&mut buffer)?;
-    Ok(String::from_utf8(buffer).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?)
+    String::from_utf8(buffer).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
-/// Decodes the handshake packet to extract the server address
+/// Decodes the handshake packet to extract the server address.
 fn decode_handshake_packet(buffer: &[u8]) -> io::Result<String> {
     let mut cursor = Cursor::new(buffer);
     let _ = read_varint(&mut cursor)?; // Packet length
