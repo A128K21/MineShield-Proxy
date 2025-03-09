@@ -13,12 +13,12 @@
   Uses a YAML configuration file for easy setup of redirections and advanced features. If no config exists, a default one is automatically generated.
   
 - **Target Overload Prevention:**  
-  Prevents a single target server from being overwhelmed by rate limiting connections per target.
+  Prevents a single target server from being overwhelmed by rate limiting connections per second.
   
 - **Configurable Thread Pool:**  
   Customize the number of threads used by the proxy (default is 4) for optimal performance.
   
-- **Proxy Protocol v2 Support:**  
+- **Proxy Protocol v2:**  
   Ensures that your backend servers receive accurate client IP information.
   
 - **IP & Domain Filtering:**  
