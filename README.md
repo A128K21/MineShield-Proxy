@@ -87,15 +87,7 @@
    ```
 
 3. **Run the Docker Container:**
-
-   To start the proxy and expose port 25565 on your host, run:
-
-   ```bash
-   docker run -d -p 25565:25565 mineshield-proxy
-   ```
-
-4. **Using a Custom Configuration:**
-
+   
    If you want to use a custom configuration file (`config.yml`), mount it as a volume:
 
    ```bash
