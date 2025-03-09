@@ -1,4 +1,4 @@
-# MineShield v2 Proxy
+# MineShield Proxy
 
 ![Build Status](https://img.shields.io/badge/build-passing-brightgreen)
 ![License](https://img.shields.io/badge/license-MIT-blue)
@@ -47,7 +47,7 @@ MineShield v2 Proxy is a next-generation Minecraft proxy written in Rust. It’s
     prevent_target_overload:
       # Set `enabled` to true to enable target overload prevention.
       enabled: false
-      # The `rate_limit_per_target` field specifies the maximum number of requests allowed per target.
+      # The `rate_limit_per_target` field specifies the maximum number of requests allowed per second.
       rate_limit_per_target: 10
     
     # Number of threads to use for the proxy (only used at startup)
