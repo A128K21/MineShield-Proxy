@@ -15,13 +15,13 @@ ENV RUSTC_WRAPPER=sccache
 WORKDIR /usr/src/myapp
 
 # Copy only the Cargo.toml and Cargo.lock files first to cache dependencies
-COPY Cargo.toml Cargo.lock ./
+COPY ../Cargo.toml Cargo.lock ./
 
 # Fetch dependencies to cache them
 RUN cargo fetch
 
 # Copy the source code into the Docker image
-COPY . .
+COPY .. .
 
 # Enable incremental compilation and set the number of jobs to 16 for parallel builds
 ENV CARGO_INCREMENTAL=1
