@@ -11,22 +11,17 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v3
 
-      - name: Install Rust toolchain (stable) + targets
+      - name: Install Rust toolchain (stable)
         uses: actions-rs/toolchain@v1
         with:
           toolchain: stable
-          target: |
-            x86_64-unknown-linux-gnu
-            aarch64-unknown-linux-gnu
+          target: x86_64-unknown-linux-gnu
           override: true
 
       - name: Build for x86_64-unknown-linux-gnu
         run: cargo build --release --target x86_64-unknown-linux-gnu
 
-      - name: Build for aarch64-unknown-linux-gnu
-        run: cargo build --release --target aarch64-unknown-linux-gnu
-
-      - name: Create GitHub Release with both binaries
+      - name: Create GitHub Release (x86_64 only)
         uses: softprops/action-gh-release@v1
         with:
           # Generate a tag for each push to main
@@ -35,10 +30,9 @@ jobs:
           draft: false
           prerelease: false
 
-          # Attach the x86_64 and aarch64 binaries directly from the build folders.
-          # The syntax "path#name" renames each file in the release.
+          # Attach the x86_64 binary from the local target folder.
+          # The syntax "path#name" renames the file in the release.
           files: |
             target/x86_64-unknown-linux-gnu/release/<your_executable_name>#<your_executable_name>-x86_64
-            target/aarch64-unknown-linux-gnu/release/<your_executable_name>#<your_executable_name>-aarch64
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
