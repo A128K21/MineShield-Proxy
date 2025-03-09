@@ -2,9 +2,8 @@ name: Build and Release
 
 on:
   push:
-    tags:
-      - 'v*'  # Only trigger on tag pushes (e.g. v1.0.0)
-
+    branches: [ main ]
+    
 jobs:
   release:
     name: Create Release and Build for ${{ matrix.target }}
