@@ -30,12 +30,8 @@
 
 
 ## Getting Started
-### Prerequisites
 
-- [Rust](https://www.rust-lang.org/tools/install) (latest stable version recommended)
-- Cargo (comes with Rust)
-
-### Installation
+### Bare Metal Installation
 
 1. **Clone the repository:**
 
@@ -43,24 +39,66 @@
    git clone https://github.com/A128K21/MineShield-Proxy.git
    cd mineshieldv2-proxy
    cargo build --release
+   ```
 
-2. **Configure the proxy**
-   ```bash
+2. **Configure the proxy:**
+
+   Create or edit the `config.yml` file in the repository root with the following content:
+
+   ```yaml
    # Default configuration for proxy redirections.
-    prevent_target_overload:
-      # Set `enabled` to true to enable target overload prevention.
-      enabled: false
-      # The `rate_limit_per_target` field specifies the maximum number of requests allowed per second.
-      rate_limit_per_target: 10
-    
-    # Number of threads to use for the proxy (only used at startup)
-    proxy_threads: 4
-    
-    redirections:
-      - incoming_domain: "example.com"
-        target: "192.168.1.100:8080"
-      - incoming_domain: "test.com"
-        target: "some.domain.com:9090"
+   prevent_target_overload:
+     # Set `enabled` to true to enable target overload prevention.
+     enabled: false
+     # The `rate_limit_per_target` field specifies the maximum number of requests allowed per second.
+     rate_limit_per_target: 10
+
+   # Number of threads to use for the proxy (only used at startup)
+   proxy_threads: 4
+
+   redirections:
+     - incoming_domain: "example.com"
+       target: "192.168.1.100:8080"
+     - incoming_domain: "test.com"
+       target: "some.domain.com:9090"
+   ```
+
+3. **Run the proxy:**
+
+   ```bash
+   ./target/release/mineshield-proxy
+   ```
+
+---
+
+### Docker Installation
+
+1. **Build the Docker Image:**
+
+   From the root directory of the repository, run:
+
+   ```bash
+   docker build -t mineshield-proxy .
+   ```
+
+2. **Run the Docker Container:**
+
+   To start the proxy and expose port 25565 on your host, run:
+
+   ```bash
+   docker run -d -p 25565:25565 mineshield-proxy
+   ```
+
+3. **Using a Custom Configuration:**
+
+   If you want to use a custom configuration file (`config.yml`), mount it as a volume:
+
+   ```bash
+   docker run -d -p 25565:25565 -v /path/to/your/config.yml:/app/config.yml mineshield-proxy
+   ```
+
+   Replace `/path/to/your/config.yml` with the actual path to your config file on the host.
+
  3. **Happy proxying! 🚀**
     ```bash
     Feel free to adjust sections, links, and badges as needed to match your project details. This README should give users and contributors a clear understanding of what your proxy does, how to set it up, and how to contribute.
