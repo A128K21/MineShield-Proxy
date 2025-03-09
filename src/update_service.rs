@@ -3,14 +3,15 @@ use std::net::{ToSocketAddrs, Ipv4Addr};
 use std::sync::Mutex;
 use std::fs::File;
 use std::io::{Read, Write};
+use std::time::{SystemTime, UNIX_EPOCH};
 use lazy_static::lazy_static;
 use serde::Deserialize;
 
 lazy_static! {
     // Mapping from incoming domain to target (IP and port)
     static ref PROXY_MAP: Mutex<HashMap<String, (Ipv4Addr, u16)>> = Mutex::new(HashMap::new());
-    // Active connection counts per target domain
-    static ref ACTIVE_TARGET_CONNECTIONS: Mutex<HashMap<String, usize>> = Mutex::new(HashMap::new());
+    // For each target, track (timestamp in seconds, count of connection attempts in that second)
+    static ref ACTIVE_TARGET_CONNECTIONS: Mutex<HashMap<String, (u64, usize)>> = Mutex::new(HashMap::new());
     // Overload configuration (loaded from the config file)
     static ref OVERLOAD_CONFIG: Mutex<PreventTargetOverloadConfig> = Mutex::new(PreventTargetOverloadConfig::default());
     // Number of threads to be used by the proxy (set at startup)
@@ -30,7 +31,7 @@ pub struct Config {
     /// Settings for target overload prevention.
     #[serde(default)]
     pub prevent_target_overload: PreventTargetOverloadConfig,
-    /// Number of threads to use for the proxy. This is only read at startup.
+    /// Number of threads to use for the proxy. (Only read at startup.)
     #[serde(default = "default_proxy_threads")]
     pub proxy_threads: usize,
     pub redirections: Vec<Redirection>,
@@ -41,7 +42,7 @@ pub struct PreventTargetOverloadConfig {
     /// Whether to enable target overload prevention.
     #[serde(default)]
     pub enabled: bool,
-    /// Maximum number of requests allowed per target.
+    /// Maximum number of connection attempts allowed per target per second.
     #[serde(default = "default_rate_limit")]
     pub rate_limit_per_target: usize,
 }
@@ -52,34 +53,42 @@ pub struct Redirection {
     pub target: String,
 }
 
-/// A guard that holds registration of one connection for a given target.
-/// When the guard is dropped, the active connection count is decremented.
+/// A guard that is returned when a connection is allowed.
+/// (In this per‑second rate limiter, dropping the guard does nothing.)
 pub struct ConnectionGuard {
     pub target: String,
 }
 
 impl Drop for ConnectionGuard {
     fn drop(&mut self) {
-        let mut connections = ACTIVE_TARGET_CONNECTIONS.lock().unwrap();
-        if let Some(count) = connections.get_mut(&self.target) {
-            if *count > 0 {
-                *count -= 1;
-            }
-        }
+        // Do nothing—the per‑second rate limiter resets automatically.
     }
 }
 
-/// Try to register a connection for a given target.
+/// Attempts to register a connection for a given target.
 /// Returns Some(Arc<ConnectionGuard>) if allowed, or None if the rate limit is exceeded.
 pub fn try_register_connection(target: &str) -> Option<std::sync::Arc<ConnectionGuard>> {
     let mut connections = ACTIVE_TARGET_CONNECTIONS.lock().unwrap();
-    let count = connections.entry(target.to_string()).or_insert(0);
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
     let overload = OVERLOAD_CONFIG.lock().unwrap();
-    if overload.enabled && *count >= overload.rate_limit_per_target {
-        return None;
+    if !overload.enabled {
+        // If overload prevention is disabled, always allow.
+        return Some(std::sync::Arc::new(ConnectionGuard {
+            target: target.to_string(),
+        }));
     }
-    *count += 1;
-    drop(connections);
+    // Get or create an entry for the target.
+    let entry = connections.entry(target.to_string()).or_insert((now, 0));
+    if entry.0 == now {
+        if entry.1 >= overload.rate_limit_per_target {
+            return None;
+        } else {
+            entry.1 += 1;
+        }
+    } else {
+        // New second: reset counter.
+        *entry = (now, 1);
+    }
     Some(std::sync::Arc::new(ConnectionGuard {
         target: target.to_string(),
     }))
@@ -90,7 +99,7 @@ fn convert_to_ipv4(addr: &str) -> Result<Ipv4Addr, String> {
     if let Ok(ip) = addr.parse::<Ipv4Addr>() {
         return Ok(ip);
     }
-    // Otherwise, resolve the domain name.
+    // Otherwise, resolve the domain.
     let socket_addrs = (addr, 0)
         .to_socket_addrs()
         .map_err(|e| format!("Failed to resolve domain name: {}", e))?;
@@ -114,7 +123,7 @@ fn parse_target(target: &str) -> Result<(Ipv4Addr, u16), String> {
 }
 
 /// Loads the configuration from the given path. If the file does not exist,
-/// a default configuration (with comments) is generated and written to the file.
+/// a default configuration (with inline comments) is generated and written to the file.
 pub fn update_proxies_from_config(config_path: &str) {
     let mut contents = String::new();
 
@@ -122,14 +131,14 @@ pub fn update_proxies_from_config(config_path: &str) {
         Ok(mut file) => {
             file.read_to_string(&mut contents)
                 .expect("Unable to read config file");
-        },
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             println!("Config file not found. Creating a default config file.");
             contents = r#"# Default configuration for proxy redirections.
 prevent_target_overload:
   # Set `enabled` to true to enable target overload prevention.
   enabled: false
-  # The `rate_limit_per_target` field specifies the maximum number of requests allowed per target.
+  # The `rate_limit_per_target` field specifies the maximum number of connection attempts allowed per target per second.
   rate_limit_per_target: 10
 
 # Number of threads to use for the proxy (only used at startup)
@@ -146,7 +155,7 @@ redirections:
                 .expect("Unable to create default config file");
             file.write_all(contents.as_bytes())
                 .expect("Unable to write default config file");
-        },
+        }
         Err(e) => {
             panic!("Error opening config file: {}", e);
         }
@@ -155,7 +164,12 @@ redirections:
     let config: Config = serde_yaml::from_str(&contents)
         .expect("Failed to parse YAML");
 
-
+    println!(
+        "Config loaded: prevent_target_overload enabled: {}, rate_limit_per_target: {}, proxy_threads: {}",
+        config.prevent_target_overload.enabled,
+        config.prevent_target_overload.rate_limit_per_target,
+        config.proxy_threads
+    );
 
     {
         let mut overload = OVERLOAD_CONFIG.lock().unwrap();
@@ -172,7 +186,7 @@ redirections:
         match parse_target(&redirection.target) {
             Ok((ipv4, port)) => {
                 new_map.insert(redirection.incoming_domain, (ipv4, port));
-            },
+            }
             Err(e) => {
                 println!("Error parsing target {}: {}", redirection.target, e);
             }
