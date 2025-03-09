@@ -1,4 +1,4 @@
-# MineShield Proxy
+# MineShield Proxy 🦀🚀
 
 ![Build Status](https://img.shields.io/badge/build-passing-brightgreen)
 
