@@ -98,5 +98,3 @@
 ---
 
  4. **Happy proxying! 🚀**
-    
-    Feel free to adjust sections, links, and badges as needed to match your project details. This README should give users and contributors a clear understanding of what your proxy does, how to set it up, and how to contribute.
