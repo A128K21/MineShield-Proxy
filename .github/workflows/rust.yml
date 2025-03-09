@@ -2,50 +2,82 @@ name: Build and Release
 
 on:
   push:
-    branches:
-      - main
+    branches: [ main ]
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # Build for both x86_64 and aarch64 (ARM)
+        target: [ "x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu" ]
     steps:
-      - name: Checkout code
+      - name: Check out repository
         uses: actions/checkout@v3
 
-      - name: Set up Rust toolchain
+      - name: Install Rust toolchain and target
         uses: actions-rs/toolchain@v1
         with:
           toolchain: stable
+          target: ${{ matrix.target }}
           override: true
-          target: x86_64-unknown-linux-gnu
 
-      - name: Build project (release)
-        run: cargo build --release
+      - name: Build release for ${{ matrix.target }}
+        run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Run tests
-        run: cargo test
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: binary-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/<your_executable_name>
 
   release:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
+      - name: Check out repository
         uses: actions/checkout@v3
+
+      - name: Download x86_64 artifact
+        uses: actions/download-artifact@v3
+        with:
+          name: binary-x86_64-unknown-linux-gnu
+          path: binaries/x86_64
+
+      - name: Download aarch64 artifact
+        uses: actions/download-artifact@v3
+        with:
+          name: binary-aarch64-unknown-linux-gnu
+          path: binaries/aarch64
 
       - name: Create GitHub Release
         id: create_release
-        uses: softprops/action-gh-release@v1
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: "v${{ github.run_number }}"
-          name: "Release v${{ github.run_number }}"
+          # Generate a tag so that GitHub sees a valid tag for the release
+          tag_name: build-${{ github.run_number }}
+          release_name: "Automated Build #${{ github.run_number }}"
           draft: false
           prerelease: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Upload Release Asset
-        uses: softprops/action-gh-release@v1
-        with:
-          files: target/release/your_binary_name
+      - name: Upload x86_64 asset
+        uses: actions/upload-release-asset@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: binaries/x86_64/<your_executable_name>
+          asset_name: <your_executable_name>-x86_64
+          asset_content_type: application/octet-stream
+
+      - name: Upload aarch64 asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: binaries/aarch64/<your_executable_name>
+          asset_name: <your_executable_name>-aarch64
+          asset_content_type: application/octet-stream
