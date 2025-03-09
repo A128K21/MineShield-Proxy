@@ -2,18 +2,21 @@ name: Build and Release
 
 on:
   push:
-    branches: [ main ]
+    tags:
+      - 'v*'  # Only trigger on tag pushes (e.g. v1.0.0)
 
 jobs:
   release:
-    name: release ${{ matrix.target }}
+    name: Build and Release for ${{ matrix.target }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        target: [x86_64-pc-windows-gnu, x86_64-unknown-linux-musl]
+        target: [ x86_64-pc-windows-gnu, x86_64-unknown-linux-musl ]
     steps:
-      - uses: actions/checkout@master
+      - name: Check out repository
+        uses: actions/checkout@v3
+
       - name: Compile and release
         uses: rust-build/rust-build.action@v1.4.5
         env:
