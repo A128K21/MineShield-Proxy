@@ -7,7 +7,7 @@ on:
 
 jobs:
   release:
-    name: Build and Release for ${{ matrix.target }}
+    name: Create Release and Build for ${{ matrix.target }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -16,6 +16,17 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v3
+
+      - name: Create GitHub Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.ref_name }}
+          release_name: "Release ${{ github.ref_name }}"
+          draft: false
+          prerelease: false
 
       - name: Compile and release
         uses: rust-build/rust-build.action@v1.4.5
