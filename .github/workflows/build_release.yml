@@ -22,8 +22,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          # Generate a fake tag for each push
-          tag_name: build-${{ github.run_number }}
+          # Generate a unique tag for each push (avoids "already_exists" error)
+          tag_name: build-${{ github.run_number }}-${{ github.run_id }}
           release_name: "Release build #${{ github.run_number }}"
           draft: false
           prerelease: false
