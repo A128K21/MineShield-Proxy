@@ -25,8 +25,12 @@
 - **IP & Domain Filtering:**  
   Basic filtering is built-in, with room for customization to suit your security needs.
 
-## Getting Started
 
+## Flowchart
+![FlowChart](https://i.ibb.co/Z6PW1ZNy/Untitled-diagram-2025-03-09-100419.png)
+
+
+## Getting Started
 ### Prerequisites
 
 - [Rust](https://www.rust-lang.org/tools/install) (latest stable version recommended)
