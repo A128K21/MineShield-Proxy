@@ -97,5 +97,4 @@
    Replace `/path/to/your/config.yml` with the actual path to your config file on the host.
 
  3. **Happy proxying! 🚀**
-    ```bash
     Feel free to adjust sections, links, and badges as needed to match your project details. This README should give users and contributors a clear understanding of what your proxy does, how to set it up, and how to contribute.
