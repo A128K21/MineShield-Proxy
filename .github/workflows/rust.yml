@@ -1,55 +1,51 @@
-name: Rust
+name: Build and Release
 
 on:
   push:
-    branches: [ "master" ]
-  pull_request:
-    branches: [ "master" ]
-
-env:
-  CARGO_TERM_COLOR: always
+    branches:
+      - main
 
 jobs:
   build:
-
     runs-on: ubuntu-latest
-
     steps:
-    - uses: actions/checkout@v4
-    - name: Build
-      run: cargo build --release
-    
+      - name: Checkout code
+        uses: actions/checkout@v3
 
+      - name: Set up Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+          target: x86_64-unknown-linux-gnu
 
-    - name: Package
-      run: zip -j mineshield.zip target/release/mineshield-xyz
+      - name: Build project (release)
+        run: cargo build --release
 
-    # Check if the current commit is tagged
-    - name: Check Tag
-      id: check_tag
-      run: echo "TAG_NAME=$(git tag --points-at HEAD)" >> $GITHUB_ENV
-      shell: bash
+      - name: Run tests
+        run: cargo test
 
-    # Create or use the existing Tag
-    - name: Create Tag if none
-      if: env.TAG_NAME == ''
-      run: |
-        NEW_TAG="v$(date +'%Y.%m.%d.%H%M%S')"  # Example tag format: v2023.04.29.153000
-        git tag $NEW_TAG
-        echo "NEW_TAG=$NEW_TAG" >> $GITHUB_ENV
-        echo "TAG_CREATED=true" >> $GITHUB_ENV
-    # Create Release new
-    - name: Create Release
-      uses: softprops/action-gh-release@v1
-      if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-      with:
-        files: mineshield.zip
-        tag_name: ${{ env.TAG_NAME || env.NEW_TAG }}
-        draft: false
-        prerelease: false
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
 
-    # This step will print the URL of the newly created release
-    - name: Get the URL of the created Release
-      run: echo "Release URL is ${{ steps.create_release.outputs.upload_url }}"
+      - name: Create GitHub Release
+        id: create_release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: "v${{ github.run_number }}"
+          name: "Release v${{ github.run_number }}"
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload Release Asset
+        uses: softprops/action-gh-release@v1
+        with:
+          files: target/release/your_binary_name
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
