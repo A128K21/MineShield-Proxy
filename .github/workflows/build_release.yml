@@ -5,37 +5,19 @@ on:
     branches: [ main ]
 
 jobs:
-  build_and_release:
+  release:
+    name: release ${{ matrix.target }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64-pc-windows-gnu, x86_64-unknown-linux-musl]
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v3
-
-      - name: Install Rust toolchain (stable)
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          target: x86_64-unknown-linux-gnu
-          override: true
-
-      - name: Build for x86_64
-        run: |
-          cargo build --release --target x86_64-unknown-linux-gnu
-          echo "List of files in release folder:"
-          ls -la target/x86_64-unknown-linux-gnu/release
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v1
-        with:
-          # Generate a tag for each push
-          tag_name: build-${{ github.run_number }}
-          release_name: "Automated Build #${{ github.run_number }}"
-          draft: false
-          prerelease: false
-
-          # Attach the x86_64 binary
-          # The syntax "path#name" renames the file in the release.
-          files: |
-            target/x86_64-unknown-linux-gnu/release/mineshieldv2-proxy#mineshieldv2-proxy-x86_64
+      - uses: actions/checkout@master
+      - name: Compile and release
+        uses: rust-build/rust-build.action@v1.4.5
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          RUSTTARGET: ${{ matrix.target }}
+          EXTRA_FILES: "README.md LICENSE"
