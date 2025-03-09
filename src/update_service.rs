@@ -164,12 +164,6 @@ redirections:
     let config: Config = serde_yaml::from_str(&contents)
         .expect("Failed to parse YAML");
 
-    println!(
-        "Config loaded: prevent_target_overload enabled: {}, rate_limit_per_target: {}, proxy_threads: {}",
-        config.prevent_target_overload.enabled,
-        config.prevent_target_overload.rate_limit_per_target,
-        config.proxy_threads
-    );
 
     {
         let mut overload = OVERLOAD_CONFIG.lock().unwrap();
