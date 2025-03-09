@@ -40,7 +40,7 @@
 1. **Clone the repository:**
 
    ```bash
-   git clone https://github.com/TheForgTN/mineshieldv2-proxy.git
+   git clone https://github.com/A128K21/MineShield-Proxy.git
    cd mineshieldv2-proxy
    cargo build --release
 
