@@ -3,24 +3,28 @@ name: Build and Artifact
 on:
   push:
     branches: [ main ]
-    
+
 jobs:
   build:
-    name: Build for ${{ matrix.target }}
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        target: [ x86_64-unknown-linux-musl ]
     steps:
       - name: Check out repository
         uses: actions/checkout@v3
 
-      - name: Compile and upload artifact
-        uses: rust-build/rust-build.action@v1.4.5
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install Rust toolchain
+        uses: actions-rs/toolchain@v1
         with:
-          RUSTTARGET: ${{ matrix.target }}
-          EXTRA_FILES: "README.md LICENSE"
-          UPLOAD_MODE: artifact
+          toolchain: stable
+          target: x86_64-unknown-linux-musl
+          override: true
+
+      - name: Build for x86_64
+        run: |
+          cargo build --release --target x86_64-unknown-linux-musl
+          ls -la target/x86_64-unknown-linux-musl/release
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: my-binary
+          path: target/x86_64-unknown-linux-musl/release/mineshieldv2-proxy
