@@ -26,5 +26,5 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: my-binary
+          name: mineshield-proxy-x86-64-linux
           path: target/x86_64-unknown-linux-musl/release/mineshieldv2-proxy
