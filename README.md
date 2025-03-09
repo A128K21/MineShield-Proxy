@@ -73,15 +73,20 @@
 
 ### Docker Installation
 
-1. **Build the Docker Image:**
+1. **Clone the repository and change into the directory:**
 
-   From the root directory of the repository, run:
+   ```bash
+   git clone https://github.com/A128K21/MineShield-Proxy.git
+   cd mineshieldv2-proxy
+   ```
+
+2. **Build the Docker Image:**
 
    ```bash
    docker build -t mineshield-proxy .
    ```
 
-2. **Run the Docker Container:**
+3. **Run the Docker Container:**
 
    To start the proxy and expose port 25565 on your host, run:
 
@@ -89,7 +94,7 @@
    docker run -d -p 25565:25565 mineshield-proxy
    ```
 
-3. **Using a Custom Configuration:**
+4. **Using a Custom Configuration:**
 
    If you want to use a custom configuration file (`config.yml`), mount it as a volume:
 
