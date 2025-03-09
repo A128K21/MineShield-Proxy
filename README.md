@@ -3,7 +3,7 @@
 ![Build Status](https://img.shields.io/badge/build-passing-brightgreen)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 
-MineShield v2 Proxy is a next-generation Minecraft proxy written in Rust. It’s designed to be fast, efficient, and highly configurable – perfect for server owners who want advanced control over their network traffic. With built-in target overload prevention, rate limiting, and support for Proxy Protocol v2, MineShield v2 Proxy ensures your Minecraft server network runs smoothly and securely.
+**MineShield Proxy** is a next-generation high performance Minecraft proxy written in Rust. It’s designed to be fast, efficient, and stable—capable of handling over 10,000 connections simultaneously. Perfect for server owners who want advanced control over their network traffic, MineShield Proxy comes with built-in target overload prevention, rate limiting, and Proxy Protocol v2 support to ensure your Minecraft server network runs smoothly and securely.
 
 ## Features
 
