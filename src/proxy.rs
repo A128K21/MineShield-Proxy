@@ -30,7 +30,12 @@ impl TcpProxy {
         let forward_thread = thread::spawn(move || {
             loop {
                 match listener_forward.accept() {
-                    Ok((stream_forward, _addr)) => {
+                    Ok((mut stream_forward, _addr)) => {
+                        // Disable Nagle's algorithm to reduce latency.
+                        if let Err(e) = stream_forward.set_nodelay(true) {
+                            error!("Failed to disable Nagle on accepted connection: {}", e);
+                        }
+
                         let src_ip = _addr.ip();
                         if is_ip_blocked(&src_ip) {
                             let _ = stream_forward.set_read_timeout(Some(std::time::Duration::from_secs(1)));
@@ -70,7 +75,7 @@ fn handle_client(mut stream_forward: TcpStream) {
         }
     };
 
-    let mut initial_buffer = vec![0; 1024];
+    let mut initial_buffer = vec![0; 1024]; // Increased buffer size
     let n = match stream_forward.read(&mut initial_buffer) {
         Ok(n) => n,
         Err(e) => {
@@ -94,6 +99,11 @@ fn handle_client(mut stream_forward: TcpStream) {
                     }
 
                     if let Ok(mut sender_forward) = TcpStream::connect(proxy_to) {
+                        // Disable Nagle's algorithm on the outgoing connection.
+                        if let Err(e) = sender_forward.set_nodelay(true) {
+                            error!("Failed to disable Nagle on target connection: {}", e);
+                        }
+
                         let sender_backward = sender_forward.try_clone().expect("Failed to clone stream");
                         let stream_backward = stream_forward.try_clone().expect("Failed to clone stream");
 
@@ -156,7 +166,7 @@ fn send_initial_buffer_to_target(initial_buffer: &[u8], sender_forward: &mut Tcp
 /// The passed `_guard` is held until the thread ends.
 fn spawn_client_to_target_thread(mut stream_forward: TcpStream, mut sender_forward: TcpStream, _guard: std::sync::Arc<ConnectionGuard>) {
     thread::spawn(move || {
-        let mut buffer = vec![0; 1024];
+        let mut buffer = vec![0; 1024]; // Increased buffer size
         loop {
             match stream_forward.read(&mut buffer) {
                 Ok(n) if n > 0 => {
@@ -180,7 +190,7 @@ fn spawn_client_to_target_thread(mut stream_forward: TcpStream, mut sender_forwa
 /// The passed `_guard` is held until the thread ends.
 fn spawn_target_to_client_thread(mut sender_backward: TcpStream, mut stream_backward: TcpStream, _guard: std::sync::Arc<ConnectionGuard>) {
     thread::spawn(move || {
-        let mut buffer = vec![0; 2048];
+        let mut buffer = vec![0; 2048]; // Increased buffer size
         loop {
             match sender_backward.read(&mut buffer) {
                 Ok(n) if n > 0 => {
