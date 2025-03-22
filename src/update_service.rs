@@ -1,5 +1,6 @@
 use std::collections::HashMap;
-use std::net::{ToSocketAddrs, Ipv4Addr};
+use std::ffi::c_int;
+use std::net::{ToSocketAddrs, Ipv4Addr, SocketAddr};
 use std::sync::Mutex;
 use std::fs::File;
 use std::io::{Read, Write};
@@ -9,13 +10,15 @@ use serde::Deserialize;
 
 lazy_static! {
     // Mapping from incoming domain to target (IP and port)
-    static ref PROXY_MAP: Mutex<HashMap<String, (Ipv4Addr, u16)>> = Mutex::new(HashMap::new());
+    pub static ref PROXY_MAP: Mutex<HashMap<String, (Ipv4Addr, u16)>> = Mutex::new(HashMap::new());
     // For each target, track (timestamp in seconds, count of connection attempts in that second)
     static ref ACTIVE_TARGET_CONNECTIONS: Mutex<HashMap<String, (u64, usize)>> = Mutex::new(HashMap::new());
     // Overload configuration (loaded from the config file)
     static ref OVERLOAD_CONFIG: Mutex<PreventTargetOverloadConfig> = Mutex::new(PreventTargetOverloadConfig::default());
     // Number of threads to be used by the proxy (set at startup)
     pub static ref PROXY_THREADS: Mutex<usize> = Mutex::new(default_proxy_threads());
+    // Bind address for the proxy (loaded from config)
+    pub static ref BIND_ADDRESS: Mutex<SocketAddr> = Mutex::new(default_bind_address());
 }
 
 fn default_proxy_threads() -> usize {
@@ -26,8 +29,15 @@ fn default_rate_limit() -> usize {
     10
 }
 
+fn default_bind_address() -> SocketAddr {
+    "0.0.0.0:25565".parse().unwrap()
+}
+
 #[derive(Debug, Deserialize)]
 pub struct Config {
+    /// Where should the proxy listen for connections?
+    #[serde(rename = "bind-address")]
+    pub bind_address: String,
     /// Settings for target overload prevention.
     #[serde(default)]
     pub prevent_target_overload: PreventTargetOverloadConfig,
@@ -135,6 +145,9 @@ pub fn update_proxies_from_config(config_path: &str) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             println!("Config file not found. Creating a default config file.");
             contents = r#"# Default configuration for proxy redirections.
+# Where should the proxy listen for connections?
+bind-address: "0.0.0.0:25565"
+
 prevent_target_overload:
   # Set `enabled` to true to enable target overload prevention.
   enabled: false
@@ -143,7 +156,7 @@ prevent_target_overload:
 
 # Number of threads to use for the proxy (only used at startup)
 proxy_threads: 4
-
+# Where should we route incoming connections?
 redirections:
   - incoming_domain: "example.com"
     target: "192.168.1.100:8080"
@@ -164,6 +177,11 @@ redirections:
     let config: Config = serde_yaml::from_str(&contents)
         .expect("Failed to parse YAML");
 
+    // Update global bind address
+    {
+        let mut bind_addr = BIND_ADDRESS.lock().unwrap();
+        *bind_addr = config.bind_address.parse().expect("Invalid bind address in config");
+    }
 
     {
         let mut overload = OVERLOAD_CONFIG.lock().unwrap();
