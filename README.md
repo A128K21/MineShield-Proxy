@@ -46,24 +46,24 @@
    Create or edit the `config.yml` file in the repository root with the following content:
 
    ```yaml
-   # Default configuration for proxy redirections.
-  # Where should the proxy listen for connections?
-  bind-address: "0.0.0.0:25565"
-  
-  prevent_target_overload:
-    # Set `enabled` to true to enable target overload prevention.
-    enabled: false
-    # The `rate_limit_per_target` field specifies the maximum number of connection attempts allowed per target per second.
-    rate_limit_per_target: 10
-  
-  # Number of threads to use for the proxy (only used at startup)
-  proxy_threads: 4
-  # Where should we route incoming connections?
-  redirections:
-    - incoming_domain: "example.com"
-      target: "192.168.1.100:8080"
-    - incoming_domain: "test.com"
-      target: "some.domain.com:9090"
+        # Default configuration for proxy redirections.
+        # Where should the proxy listen for connections?
+        bind-address: "0.0.0.0:25565"
+        
+        prevent_target_overload:
+          # Set `enabled` to true to enable target overload prevention.
+          enabled: false
+          # The `rate_limit_per_target` field specifies the maximum number of connection attempts allowed per target per second.
+          rate_limit_per_target: 10
+        
+        # Number of threads to use for the proxy (only used at startup)
+        proxy_threads: 4
+        # Where should we route incoming connections?
+        redirections:
+          - incoming_domain: "example.com"
+            target: "192.168.1.100:8080"
+          - incoming_domain: "test.com"
+            target: "some.domain.com:9090"
    ```
 
 3. **Run the proxy:**
