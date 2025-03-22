@@ -21,8 +21,8 @@
 - **Proxy Protocol v2:**  
   Ensures that your backend servers receive accurate client IP information.
   
-- **IP & Domain Filtering:**  
-  Basic filtering is built-in, with room for customization to suit your security needs.
+- **MOTD Cacheing**  
+  The proxy pings the target servers in every second and keeps it's cache up to date.
 
 
 ## Flowchart
