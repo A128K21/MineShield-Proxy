@@ -13,12 +13,14 @@ use proxy_protocol::{
 };
 use serde_json::Value;
 
+
+// A globális státusz cache: domain -> legutóbbi JSON status
 lazy_static! {
-    // Global status cache: key is the domain, value is the latest JSON status.
     pub static ref STATUS_CACHE: Mutex<HashMap<String, String>> = Mutex::new(HashMap::new());
 }
 
-/// Reads a VarInt from the given reader.
+// ------------------ VarInt segédfüggvények ------------------
+
 pub fn read_varint<R: Read>(reader: &mut R) -> io::Result<u32> {
     let mut num_read = 0;
     let mut result = 0;
@@ -38,7 +40,6 @@ pub fn read_varint<R: Read>(reader: &mut R) -> io::Result<u32> {
     Ok(result)
 }
 
-/// Writes a VarInt into the provided buffer.
 pub fn write_varint(mut value: u32, buf: &mut Vec<u8>) {
     loop {
         let mut byte = (value & 0x7F) as u8;
@@ -47,17 +48,20 @@ pub fn write_varint(mut value: u32, buf: &mut Vec<u8>) {
             byte |= 0x80;
         }
         buf.push(byte);
-        if value == 0 { break; }
+        if value == 0 {
+            break;
+        }
     }
 }
 
-/// Writes a string (length-prefixed as a VarInt) into the buffer.
+/// Hozzáfűz egy hossz (VarInt) + UTF8 stringet a bufferhez.
 pub fn write_string(s: &str, buf: &mut Vec<u8>) {
     write_varint(s.len() as u32, buf);
     buf.extend_from_slice(s.as_bytes());
 }
 
-/// Builds the proxy-protocol header using the exact same logic as in your proxy code.
+// ------------------ Proxy Protocol header ------------------
+
 pub fn build_proxy_protocol_header(src_addr: SocketAddr, dst_addr: SocketAddr) -> Vec<u8> {
     let proxy_addr = match (src_addr, dst_addr) {
         (SocketAddr::V4(source), SocketAddr::V4(destination)) => {
@@ -75,27 +79,24 @@ pub fn build_proxy_protocol_header(src_addr: SocketAddr, dst_addr: SocketAddr) -
         .to_vec()
 }
 
+// ------------------ Minecraft handshake csomagok ------------------
 
-/// Builds a handshake packet for a status request.
-/// Packet structure:
-///   [Packet Length VarInt]
-///   [Packet ID VarInt (0x00)]
-///   [Protocol Version VarInt]
-///   [Server Address (string)]
-///   [Port (u16 big endian)]
-///   [Next State VarInt (1)]
+/// Handshake csomag építése (status lekéréshez).
+/// [VarInt: packet_len] [VarInt: packet_id=0x00]
+/// [VarInt: protocol_version] [String: server_address]
+/// [u16: port] [VarInt: next_state=1]
 pub fn build_handshake_packet(server_address: &str, protocol_version: u32, port: u16) -> Vec<u8> {
     let mut packet_data = Vec::new();
-    // Handshake packet ID.
+    // packet_id = 0x00 (handshake)
     write_varint(0x00, &mut packet_data);
-    // Protocol version.
+    // protocol version
     write_varint(protocol_version, &mut packet_data);
-    // Server address.
+    // server_address
     write_string(server_address, &mut packet_data);
-    // Port (big-endian).
+    // port (big-endian)
     packet_data.push((port >> 8) as u8);
     packet_data.push((port & 0xFF) as u8);
-    // Next state: 1 (status).
+    // next_state = 1 (status)
     write_varint(1, &mut packet_data);
 
     let mut packet = Vec::new();
@@ -104,7 +105,7 @@ pub fn build_handshake_packet(server_address: &str, protocol_version: u32, port:
     packet
 }
 
-/// Builds a status request packet (packet id 0x00, no payload).
+/// Status request packet (packet id 0x00, payload üres).
 pub fn build_status_request_packet() -> Vec<u8> {
     let mut data = Vec::new();
     write_varint(0x00, &mut data);
@@ -114,11 +115,8 @@ pub fn build_status_request_packet() -> Vec<u8> {
     packet
 }
 
-/// Reads the complete status response from the target.
-/// It first reads the VarInt length and then reads exactly that many bytes,
-/// then decodes the packet (expecting packet id 0x00 and a JSON string).
+/// Kiolvassa a status választ a streamből: [VarInt: length], [VarInt: packet_id=0x00], [VarInt: json_len], [bytes: json]
 pub fn read_status_response(stream: &mut TcpStream) -> io::Result<String> {
-    // Read full packet length.
     let packet_length = read_varint(stream)? as usize;
     let mut packet_buf = vec![0u8; packet_length];
     stream.read_exact(&mut packet_buf)?;
@@ -136,10 +134,9 @@ pub fn read_status_response(stream: &mut TcpStream) -> io::Result<String> {
     Ok(json)
 }
 
-/// Pings the target server and returns its status JSON.
-/// Note: This function sends the proxy-protocol header using the same logic as in your proxy.
-/// Pings the target server and returns its status JSON without modifying it.
-/// The proxy measures latency and logs it, but the returned JSON remains unchanged.
+// ------------------ A tényleges pingelés logikája ------------------
+
+/// Pingeli a szervert Proxy Protocol v2 fejléccel és visszaadja a status JSON-t.
 pub fn ping_target(
     server_address: &str,
     ip: Ipv4Addr,
@@ -147,63 +144,70 @@ pub fn ping_target(
     protocol_version: u32,
 ) -> io::Result<String> {
     let target_addr = SocketAddr::new(ip.into(), port);
-    // Connect with a timeout.
+    // Csatlakozás 1 mp timeouttal
     let mut stream = TcpStream::connect_timeout(&target_addr, Duration::from_secs(1))?;
     stream.set_nodelay(true)?;
-    // Optionally, set a read timeout (e.g., 2 seconds) to avoid hanging.
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
 
-    // Send the proxy-protocol header.
+    // Proxy-protocol header küldése
     let local_addr = stream.local_addr()?;
     let proxy_header = build_proxy_protocol_header(local_addr, target_addr);
     stream.write_all(&proxy_header)?;
     stream.flush()?;
 
-    // Record start time.
+    // Indul az időmérés
     let start = Instant::now();
 
-    // Send handshake packet.
+    // Kézfogás (handshake) csomag
     let handshake_packet = build_handshake_packet(server_address, protocol_version, port);
     stream.write_all(&handshake_packet)?;
     stream.flush()?;
 
-    // Send status request packet.
+    // Status request
     let status_request = build_status_request_packet();
     stream.write_all(&status_request)?;
     stream.flush()?;
 
-    // Increase delay slightly to ensure the full response is sent.
+    // Rövid várakozás, hogy biztos beérkezzen a teljes válasz
     std::thread::sleep(Duration::from_millis(150));
 
-    // Read the status response.
+    // Status csomag kiolvasása
     let response = read_status_response(&mut stream)?;
     let latency = start.elapsed().as_millis();
+    info!("Latency for '{}': {} ms", server_address, latency);
 
-    // Log the measured latency.
-    info!("Latency for {}: {} ms", server_address, latency);
-
-    // Return the original JSON response without any injection.
+    // Visszatérünk az eredeti JSON-nel
     Ok(response)
 }
 
-/// Background thread that pings each target every second and updates the cache.
+/// Háttérben futtatott pinger thread.
+/// Minden redirection domain-t végigpingel, és frissíti a `STATUS_CACHE`-et.
 pub fn background_pinger() {
     loop {
-        // Get a copy of the proxy map from update_service.
-        let proxy_map = crate::update_service::PROXY_MAP.lock().unwrap().clone();
-        for (domain, &(ip, port)) in proxy_map.iter() {
-            // Use a fixed protocol version for the ping (e.g. 754).
+        // Az update_service‑ben a REDIRECTION_MAP a domain -> RedirectionConfig
+        let redirection_map = crate::update_service::REDIRECTION_MAP.lock().unwrap().clone();
+
+        for (domain, redirection_cfg) in redirection_map.iter() {
+            // Ez a struct tartalmazza a .ip és .port mezőket is
+            let ip = redirection_cfg.ip;
+            let port = redirection_cfg.port;
+
+            // Teszteljük pl. a 754-es (1.16.4+) protokollal
             let protocol_version = 754;
+
             match ping_target(domain, ip, port, protocol_version) {
                 Ok(status_json) => {
-                    info!("Ping successful for {}: {}", domain, status_json);
+                    info!("Ping successful for '{}'", domain);
+                    // Mentjük a JSON-t a cache‑be
                     STATUS_CACHE.lock().unwrap().insert(domain.clone(), status_json);
                 },
                 Err(e) => {
-                    error!("Ping failed for {}: {}", domain, e);
+                    error!("Ping failed for '{}': {}", domain, e);
                 }
             }
         }
+
+        // 1 másodpercenként próbálkozzon
         std::thread::sleep(Duration::from_secs(1));
     }
 }
