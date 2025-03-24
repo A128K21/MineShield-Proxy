@@ -1,5 +1,6 @@
-// pinger.rs
-
+// ===========================================
+// Imports
+// ===========================================
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::net::{TcpStream, SocketAddr, Ipv4Addr};
@@ -13,10 +14,17 @@ use proxy_protocol::{
 };
 use serde_json::Value;
 
+// ===========================================
+// Global State: Status Cache
+// ===========================================
+// A global status cache: domain -> latest JSON status.
 lazy_static! {
-    // Global status cache: key is the domain, value is the latest JSON status.
     pub static ref STATUS_CACHE: Mutex<HashMap<String, String>> = Mutex::new(HashMap::new());
 }
+
+// ===========================================
+// Section 1: VarInt Helper Functions
+// ===========================================
 
 /// Reads a VarInt from the given reader.
 pub fn read_varint<R: Read>(reader: &mut R) -> io::Result<u32> {
@@ -38,7 +46,7 @@ pub fn read_varint<R: Read>(reader: &mut R) -> io::Result<u32> {
     Ok(result)
 }
 
-/// Writes a VarInt into the provided buffer.
+/// Writes a VarInt to the provided buffer.
 pub fn write_varint(mut value: u32, buf: &mut Vec<u8>) {
     loop {
         let mut byte = (value & 0x7F) as u8;
@@ -47,17 +55,23 @@ pub fn write_varint(mut value: u32, buf: &mut Vec<u8>) {
             byte |= 0x80;
         }
         buf.push(byte);
-        if value == 0 { break; }
+        if value == 0 {
+            break;
+        }
     }
 }
 
-/// Writes a string (length-prefixed as a VarInt) into the buffer.
+/// Appends a VarInt length and a UTF-8 string to the buffer.
 pub fn write_string(s: &str, buf: &mut Vec<u8>) {
     write_varint(s.len() as u32, buf);
     buf.extend_from_slice(s.as_bytes());
 }
 
-/// Builds the proxy-protocol header using the exact same logic as in your proxy code.
+// ===========================================
+// Section 2: Proxy Protocol Header Builder
+// ===========================================
+
+/// Builds a Proxy Protocol v2 header given the source and destination addresses.
 pub fn build_proxy_protocol_header(src_addr: SocketAddr, dst_addr: SocketAddr) -> Vec<u8> {
     let proxy_addr = match (src_addr, dst_addr) {
         (SocketAddr::V4(source), SocketAddr::V4(destination)) => {
@@ -75,27 +89,27 @@ pub fn build_proxy_protocol_header(src_addr: SocketAddr, dst_addr: SocketAddr) -
         .to_vec()
 }
 
+// ===========================================
+// Section 3: Minecraft Handshake and Packet Builders
+// ===========================================
 
-/// Builds a handshake packet for a status request.
-/// Packet structure:
-///   [Packet Length VarInt]
-///   [Packet ID VarInt (0x00)]
-///   [Protocol Version VarInt]
-///   [Server Address (string)]
-///   [Port (u16 big endian)]
-///   [Next State VarInt (1)]
+/// Builds a handshake packet for status requests.
+/// Format:
+/// [VarInt: packet_len] [VarInt: packet_id=0x00]
+/// [VarInt: protocol_version] [String: server_address]
+/// [u16: port] [VarInt: next_state=1]
 pub fn build_handshake_packet(server_address: &str, protocol_version: u32, port: u16) -> Vec<u8> {
     let mut packet_data = Vec::new();
-    // Handshake packet ID.
+    // packet_id = 0x00 (handshake)
     write_varint(0x00, &mut packet_data);
-    // Protocol version.
+    // protocol version
     write_varint(protocol_version, &mut packet_data);
-    // Server address.
+    // server_address
     write_string(server_address, &mut packet_data);
-    // Port (big-endian).
+    // port (big-endian)
     packet_data.push((port >> 8) as u8);
     packet_data.push((port & 0xFF) as u8);
-    // Next state: 1 (status).
+    // next_state = 1 (status)
     write_varint(1, &mut packet_data);
 
     let mut packet = Vec::new();
@@ -104,7 +118,7 @@ pub fn build_handshake_packet(server_address: &str, protocol_version: u32, port:
     packet
 }
 
-/// Builds a status request packet (packet id 0x00, no payload).
+/// Builds a status request packet (packet id 0x00, with an empty payload).
 pub fn build_status_request_packet() -> Vec<u8> {
     let mut data = Vec::new();
     write_varint(0x00, &mut data);
@@ -114,11 +128,14 @@ pub fn build_status_request_packet() -> Vec<u8> {
     packet
 }
 
-/// Reads the complete status response from the target.
-/// It first reads the VarInt length and then reads exactly that many bytes,
-/// then decodes the packet (expecting packet id 0x00 and a JSON string).
+// ===========================================
+// Section 4: Status Response Reading
+// ===========================================
+
+/// Reads the status response from the stream.
+/// Expected format: [VarInt: length], [VarInt: packet_id=0x00],
+/// [VarInt: json_len], [bytes: json]
 pub fn read_status_response(stream: &mut TcpStream) -> io::Result<String> {
-    // Read full packet length.
     let packet_length = read_varint(stream)? as usize;
     let mut packet_buf = vec![0u8; packet_length];
     stream.read_exact(&mut packet_buf)?;
@@ -136,10 +153,11 @@ pub fn read_status_response(stream: &mut TcpStream) -> io::Result<String> {
     Ok(json)
 }
 
-/// Pings the target server and returns its status JSON.
-/// Note: This function sends the proxy-protocol header using the same logic as in your proxy.
-/// Pings the target server and returns its status JSON without modifying it.
-/// The proxy measures latency and logs it, but the returned JSON remains unchanged.
+// ===========================================
+// Section 5: Ping Target Functionality
+// ===========================================
+
+/// Pings the target server using a Proxy Protocol v2 header and returns the status JSON.
 pub fn ping_target(
     server_address: &str,
     ip: Ipv4Addr,
@@ -147,63 +165,73 @@ pub fn ping_target(
     protocol_version: u32,
 ) -> io::Result<String> {
     let target_addr = SocketAddr::new(ip.into(), port);
-    // Connect with a timeout.
+    // Connect with a 1-second timeout
     let mut stream = TcpStream::connect_timeout(&target_addr, Duration::from_secs(1))?;
     stream.set_nodelay(true)?;
-    // Optionally, set a read timeout (e.g., 2 seconds) to avoid hanging.
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
 
-    // Send the proxy-protocol header.
+    // Send Proxy Protocol header
     let local_addr = stream.local_addr()?;
     let proxy_header = build_proxy_protocol_header(local_addr, target_addr);
     stream.write_all(&proxy_header)?;
     stream.flush()?;
 
-    // Record start time.
+    // Start measuring latency
     let start = Instant::now();
 
-    // Send handshake packet.
+    // Send handshake packet
     let handshake_packet = build_handshake_packet(server_address, protocol_version, port);
     stream.write_all(&handshake_packet)?;
     stream.flush()?;
 
-    // Send status request packet.
+    // Send status request packet
     let status_request = build_status_request_packet();
     stream.write_all(&status_request)?;
     stream.flush()?;
 
-    // Increase delay slightly to ensure the full response is sent.
+    // Wait briefly to ensure the full response is received
     std::thread::sleep(Duration::from_millis(150));
 
-    // Read the status response.
+    // Read status response
     let response = read_status_response(&mut stream)?;
     let latency = start.elapsed().as_millis();
+    info!("Latency for '{}': {} ms", server_address, latency);
 
-    // Log the measured latency.
-    info!("Latency for {}: {} ms", server_address, latency);
-
-    // Return the original JSON response without any injection.
+    // Return the JSON status
     Ok(response)
 }
 
-/// Background thread that pings each target every second and updates the cache.
+// ===========================================
+// Section 6: Background Pinger Thread
+// ===========================================
+
+/// Background thread that continuously pings each redirection domain and updates the STATUS_CACHE.
 pub fn background_pinger() {
     loop {
-        // Get a copy of the proxy map from update_service.
-        let proxy_map = crate::update_service::PROXY_MAP.lock().unwrap().clone();
-        for (domain, &(ip, port)) in proxy_map.iter() {
-            // Use a fixed protocol version for the ping (e.g. 754).
+        // Clone the redirection map from update_service (domain -> RedirectionConfig)
+        let redirection_map = crate::config_loader::REDIRECTION_MAP.lock().unwrap().clone();
+
+        for (domain, redirection_cfg) in redirection_map.iter() {
+            // Retrieve target IP and port from the configuration.
+            let ip = redirection_cfg.ip;
+            let port = redirection_cfg.port;
+
+            // Use protocol version 754 (e.g., for Minecraft 1.16.4+)
             let protocol_version = 754;
+
             match ping_target(domain, ip, port, protocol_version) {
                 Ok(status_json) => {
-                    info!("Ping successful for {}: {}", domain, status_json);
+                    info!("Ping successful for '{}'", domain);
+                    // Update the JSON status in the cache.
                     STATUS_CACHE.lock().unwrap().insert(domain.clone(), status_json);
                 },
                 Err(e) => {
-                    error!("Ping failed for {}: {}", domain, e);
+                    error!("Ping failed for '{}': {}", domain, e);
                 }
             }
         }
+
+        // Sleep for 1 second before the next round of pings.
         std::thread::sleep(Duration::from_secs(1));
     }
 }
