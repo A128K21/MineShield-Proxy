@@ -1,10 +1,16 @@
 mod proxy;
-mod update_service;
-mod pinger; // add the pinger module
+mod config_loader;
+mod target_pinger;
+mod forwarding;
 
-use std::time::Duration;
+// add the pinger module
+
+use std::collections::HashMap;
+use std::net::IpAddr;
+use std::sync::Mutex;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use crate::proxy::TcpProxy;
-use crate::update_service::BIND_ADDRESS;
+use crate::config_loader::BIND_ADDRESS;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -12,7 +18,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 
     // Load configuration initially.
-    update_service::update_proxies();
+    config_loader::update_proxies();
     let bind_addr = *BIND_ADDRESS.lock().unwrap();
     println!("█▀▄▀█ █ █▄░█ █▀▀ █▀ █░█ █ █▀▀ █░░ █▀▄ ░ ▀▄▀ █▄█ ▀█");
     println!("█░▀░█ █ █░▀█ ██▄ ▄█ █▀█ █ ██▄ █▄▄ █▄▀ ▄ █░█ ░█░ █▄");
@@ -22,14 +28,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Spawn a background thread to update configuration periodically.
     std::thread::spawn(|| {
         loop {
-            update_service::update_proxies();
+            config_loader::update_proxies();
             std::thread::sleep(Duration::from_secs(10));
         }
     });
 
     // Spawn the background pinger thread.
     std::thread::spawn(|| {
-        pinger::background_pinger();
+        target_pinger::background_pinger();
     });
 
     // Start the TCP proxy.
