@@ -8,19 +8,19 @@
 
 - **High Performance:**  
   Built with Rust and Rayon for efficient concurrency and low-latency networking.
-  
+
 - **Dynamic Configuration:**  
   Uses a YAML configuration file for easy setup of redirections and advanced features. If no config exists, a default one is automatically generated.
-  
+
 - **Target Overload Prevention:**  
   Prevents a single target server from being overwhelmed by rate limiting connections per second.
-  
+
 - **Configurable Thread Pool:**  
   Customize the number of threads used by the proxy (default is 4) for optimal performance.
-  
+
 - **Proxy Protocol v2:**  
   Ensures that your backend servers receive accurate client IP information.
-  
+
 - **MOTD Cacheing**  
   The proxy pings the target servers in every second and keeps it's cache up to date.
 
@@ -41,9 +41,16 @@
    cargo build --release
    ```
 
-   2. **Configure the proxy:**
+2. **Run the proxy:**
 
-      Create or edit the `config.yml` file in the repository root with the following content:
+   ```bash
+   ./target/release/mineshield-proxy
+   ```
+
+---
+3. **Configure the proxy:**
+
+   Start the proxy and edit the default `config.yml` file in the repository root:
 
     ```yaml
     # Default configuration for proxy redirections.
@@ -76,13 +83,7 @@
           
     ```
 
-3. **Run the proxy:**
 
-   ```bash
-   ./target/release/mineshield-proxy
-   ```
-
----
 
 ### Docker Installation
 
@@ -100,7 +101,7 @@
    ```
 
 3. **Run the Docker Container:**
-   
+
    If you want to use a custom configuration file (`config.yml`), mount it as a volume:
 
    ```bash
@@ -110,4 +111,4 @@
    Replace `/path/to/your/config.yml` with the actual path to your config file on the host.
 ---
 
- 4. **Happy proxying! 🚀**
+4. **Happy proxying! 🚀**
