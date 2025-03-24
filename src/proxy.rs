@@ -18,7 +18,7 @@ use lazy_static::lazy_static;
 use std::sync::Mutex;
 
 use crate::config_loader::{
-    resolve, try_register_connection, RedirectionConfig, PROXY_THREADS, BIND_ADDRESS,
+    resolve, RedirectionConfig, PROXY_THREADS, BIND_ADDRESS,
 };
 use crate::{forwarding, target_pinger};
 

@@ -13,8 +13,6 @@ use serde::Deserialize;
 lazy_static! {
     /// For each domain, we store its RedirectionConfig
     pub static ref REDIRECTION_MAP: Mutex<HashMap<String, RedirectionConfig>> = Mutex::new(HashMap::new());
-    /// For each domain, track (timestamp in seconds, count of connection attempts in that second)
-    static ref ACTIVE_CONNECTIONS: Mutex<HashMap<String, (u64, usize)>> = Mutex::new(HashMap::new());
     /// Number of threads to be used by the proxy (set at startup)
     pub static ref PROXY_THREADS: Mutex<usize> = Mutex::new(4);
     /// Bind address for the proxy (loaded from config)
@@ -40,9 +38,6 @@ pub struct Config {
 pub struct Redirection {
     pub incoming_domain: String,
     pub target: String,
-    /// Maximum connections forwarded per second. 0 = unlimited.
-    #[serde(default)]
-    pub rate_limit: usize,
     /// Maximum connections per second allowed from a single source.
     #[serde(default)]
     pub max_connections_per_second: usize,
@@ -62,7 +57,6 @@ pub struct Redirection {
 pub struct RedirectionConfig {
     pub ip: Ipv4Addr,
     pub port: u16,
-    pub rate_limit: usize,
     pub max_connections_per_second: usize,
     pub encryption_check: bool,
     pub max_packet_per_second: usize,
@@ -75,19 +69,7 @@ fn default_proxy_threads() -> usize {
     4
 }
 
-// ---------- Connection Guard ----------
 
-/// A guard that is returned when a connection is allowed.
-/// (In this per‑second rate limiter, dropping the guard does nothing.)
-pub struct ConnectionGuard {
-    pub domain: String,
-}
-
-impl Drop for ConnectionGuard {
-    fn drop(&mut self) {
-        // Do nothing—the per‑second rate limiter resets automatically.
-    }
-}
 
 // ---------- Helpers to load config ----------
 
@@ -122,42 +104,7 @@ fn parse_target(target: &str) -> Result<(Ipv4Addr, u16), String> {
     Ok((ipv4, port))
 }
 
-// ---------- Public API ----------
 
-/// Attempts to register a connection for the given domain. Returns a guard if allowed, None if blocked.
-pub fn try_register_connection(domain: &str) -> Option<std::sync::Arc<ConnectionGuard>> {
-    // Look up the domain's rate limit
-    let limit_opt = {
-        let map = REDIRECTION_MAP.lock().unwrap();
-        map.get(domain).map(|rd| rd.rate_limit)
-    };
-
-    // If we don't know this domain or the limit is 0 => disabled => always allow
-    let rate_limit = match limit_opt {
-        None => return Some(std::sync::Arc::new(ConnectionGuard { domain: domain.into() })),
-        Some(l) if l == 0 => {
-            return Some(std::sync::Arc::new(ConnectionGuard { domain: domain.into() }));
-        }
-        Some(l) => l,
-    };
-
-    let mut connections = ACTIVE_CONNECTIONS.lock().unwrap();
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-
-    let entry = connections.entry(domain.to_string()).or_insert((now, 0));
-    if entry.0 == now {
-        // same second
-        if entry.1 >= rate_limit {
-            return None;
-        } else {
-            entry.1 += 1;
-        }
-    } else {
-        // new second, reset
-        *entry = (now, 1);
-    }
-    Some(std::sync::Arc::new(ConnectionGuard { domain: domain.into() }))
-}
 
 /// Loads YAML from `config_path` and updates global settings.
 pub fn update_proxies_from_config(config_path: &str) {
@@ -207,7 +154,6 @@ pub fn update_proxies_from_config(config_path: &str) {
                 let rcfg = RedirectionConfig {
                     ip,
                     port,
-                    rate_limit: rd.rate_limit,
                     max_connections_per_second: rd.max_connections_per_second,
                     encryption_check: rd.encryption_check,
                     max_packet_per_second: rd.max_packet_per_second,
@@ -252,8 +198,6 @@ redirections:
     target: "127.0.0.1:25577"
     # Should we check encryption? (Placeholder - logic not shown here)
     encryption_check: false
-    # Maximum amount of connections forwarded to target per second. 0 = unlimited
-    rate_limit: 0
     # Max packets/second before kicking. 0 = none
     max_packet_per_second: 0
     # Max ping responses/second from cache
@@ -265,8 +209,6 @@ redirections:
     target: "target.local:25678"
     # Should we check encryption? (Placeholder - logic not shown here)
     encryption_check: false
-    # Maximum amount of connections forwarded to target per second. 0 = unlimited
-    rate_limit: 100
     # Max packets/second before kicking. 0 = none
     max_packet_per_second: 100
     # Max ping responses/second from cache
