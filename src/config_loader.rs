@@ -41,9 +41,6 @@ pub struct Redirection {
     /// Maximum connections per second allowed from a single source.
     #[serde(default)]
     pub max_connections_per_second: usize,
-    /// Should we check encryption? (Placeholder - logic not shown here)
-    #[serde(default)]
-    pub encryption_check: bool,
     /// Max packets/second before kicking. 0 = none.
     #[serde(default)]
     pub max_packet_per_second: usize,
@@ -58,7 +55,6 @@ pub struct RedirectionConfig {
     pub ip: Ipv4Addr,
     pub port: u16,
     pub max_connections_per_second: usize,
-    pub encryption_check: bool,
     pub max_packet_per_second: usize,
     pub max_ping_response_per_second: usize,
 }
@@ -155,7 +151,6 @@ pub fn update_proxies_from_config(config_path: &str) {
                     ip,
                     port,
                     max_connections_per_second: rd.max_connections_per_second,
-                    encryption_check: rd.encryption_check,
                     max_packet_per_second: rd.max_packet_per_second,
                     max_ping_response_per_second: rd.max_ping_response_per_second,
                 };
@@ -196,8 +191,6 @@ proxy_threads: 4
 redirections:
   - incoming_domain: "localhost"
     target: "127.0.0.1:25577"
-    # Should we check encryption? (Placeholder - logic not shown here)
-    encryption_check: false
     # Max packets/second before kicking. 0 = none
     max_packet_per_second: 0
     # Max ping responses/second from cache
@@ -207,8 +200,6 @@ redirections:
 
   - incoming_domain: "example.com"
     target: "target.local:25678"
-    # Should we check encryption? (Placeholder - logic not shown here)
-    encryption_check: false
     # Max packets/second before kicking. 0 = none
     max_packet_per_second: 100
     # Max ping responses/second from cache

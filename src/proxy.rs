@@ -151,11 +151,6 @@ fn handle_client(mut client_stream: TcpStream) {
             // Login request: Check domain filtering and connection rate limit.
             if let Some(redirection_cfg) = resolve(&server_address) {
                 if check_connection_limit(&server_address, src_ip, &redirection_cfg) {
-                    if !check_encryption_if_needed(&redirection_cfg) {
-                        error!("Encryption check failed for domain {}", server_address);
-                        let _ = client_stream.shutdown(Shutdown::Both);
-                        return;
-                    }
                     // Connect to the target server.
                     let proxy_to = SocketAddr::new(redirection_cfg.ip.into(), redirection_cfg.port);
                     match TcpStream::connect(proxy_to) {
@@ -460,7 +455,3 @@ fn send_initial_buffer_to_target(initial: &[u8], sender: &mut TcpStream) {
     }
 }
 
-/// Stub for encryption check.
-fn check_encryption_if_needed(_redirection_cfg: &RedirectionConfig) -> bool {
-    true
-}

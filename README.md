@@ -45,26 +45,36 @@
 
       Create or edit the `config.yml` file in the repository root with the following content:
 
-        ```yaml
-       # Default configuration for proxy redirections.
-       # Where should the proxy listen for connections?
-       bind-address: "127.0.0.1:25565"
-       
-       prevent_target_overload:
-        # Set `enabled` to true to enable target overload prevention.
-        enabled: false
-        # The `rate_limit_per_target` field specifies the maximum number of requests allowed per second.
-        rate_limit_per_target: 10
+    ```yaml
+    # Default configuration for proxy redirections.
+    # Where should the proxy listen for connections?
+    bind-address: "127.0.0.1:25565"
     
-       # Number of threads to use for the proxy (only used at startup)
-       proxy_threads: 4
-       # Where should we route incoming connections?
-       redirections:
-        - incoming_domain: "example.com"
-          target: "192.168.1.100:8080"
-        - incoming_domain: "test.com"
-          target: "some.domain.com:9090"
-        ```
+    # Number of threads to use for the proxy (only used at startup)
+    proxy_threads: 4
+    
+    # Where should we route incoming connections?
+    redirections:
+    - incoming_domain: "localhost"
+      target: "127.0.0.1:25577"
+      # Max packets/second before kicking. 0 = none
+      max_packet_per_second: 0
+      # Max ping responses/second from cache
+      max_ping_response_per_second: 0
+      # Maximum connections per second from a single source. 0 = unlimited
+      max_connections_per_second: 0
+    
+    - incoming_domain: "example.com"
+      target: "target.local:25678"
+      # Max packets/second before kicking. 0 = none
+      max_packet_per_second: 100
+      # Max ping responses/second from cache
+      max_ping_response_per_second: 100
+      # Maximum connections per second from a single source. 0 = unlimited
+      max_connections_per_second: 5
+       
+          
+    ```
 
 3. **Run the proxy:**
 
