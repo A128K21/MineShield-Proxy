@@ -22,9 +22,10 @@ use crate::pinger;  // if you use pinger::STATUS_CACHE, etc.
 lazy_static! {
     // (domain, source_ip) -> (timestamp_in_seconds, packet_count_this_second)
     static ref DOMAIN_SRC_PACKET_COUNT: Mutex<HashMap<(String, IpAddr),(u64, usize)>> = Mutex::new(HashMap::new());
-
     // (domain, source_ip) -> (timestamp_in_seconds, ping_count_this_second)
     static ref DOMAIN_SRC_PING_COUNT: Mutex<HashMap<(String, IpAddr),(u64, usize)>> = Mutex::new(HashMap::new());
+     // (IpAddr) -> (block_expiry_timestamp)
+    static ref BLOCKED_IPS: Mutex<HashMap<IpAddr, u64>> = Mutex::new(HashMap::new());
 }
 
 /// Check or increment the per‑domain + per‑source packet count.
@@ -115,157 +116,168 @@ impl TcpProxy {
     }
 }
 
-/// If you have any IP filter logic, place it here:
-fn is_ip_blocked(_ip: &IpAddr) -> bool {
+/// Filter incoming connections based on ip
+fn is_ip_blocked(ip: &IpAddr) -> bool {
+    let mut blocked = BLOCKED_IPS.lock().unwrap();
+    if let Some(&expiry) = blocked.get(ip) {
+        if SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() < expiry {
+            return true;
+        } else {
+            // Remove if expired
+            blocked.remove(ip);
+        }
+    }
     false
 }
+fn block_ip(ip: IpAddr) {
+    let expiry = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() + 300;
+    BLOCKED_IPS.lock().unwrap().insert(ip, expiry);
+}
+
 
 /// If you want to reject certain domain requests at handshake, do it here.
+/// TODO!!!!!!!!!!!!!!!!!
 fn to_domain_filter(_ip: &IpAddr, _domain: &str) -> bool {
     false
 }
 
-/// Example stub for encryption checks.
+/// TODO!!!!!!!!!!!!!!!!
 fn check_encryption_if_needed(_redirection_cfg: &RedirectionConfig) -> bool {
     true
 }
 
 /// The main entry point for each incoming connection.
 fn handle_client(mut client_stream: TcpStream) {
+    // 1. Szerezd meg a forrás IP‑t, és ellenőrizd, hogy nincs-e blokkolva.
     let src_ip = match client_stream.peer_addr() {
         Ok(addr) => addr.ip(),
         Err(e) => {
-            error!("Failed to get peer address: {}", e);
+            error!("Nem sikerült lekérni a peer address-t: {}", e);
+            let _ = client_stream.shutdown(Shutdown::Both);
+            return;
+        }
+    };
+    if is_ip_blocked(&src_ip) {
+        let _ = client_stream.shutdown(Shutdown::Both);
+        return;
+    }
+
+    // 2. Olvassuk be a handshake adatokat egy fix méretű bufferbe.
+    let mut buf = vec![0; 1024];
+    let n = match client_stream.read(&mut buf) {
+        Ok(n) if n > 0 => n,
+        Ok(_) => return, // EOF esetén kilépünk
+        Err(e) => {
+            error!("Olvasási hiba {}-tól: {}", src_ip, e);
+            let _ = client_stream.shutdown(Shutdown::Both);
+            return;
+        }
+    };
+    buf.truncate(n);
+
+    // 3. Próbáljuk meg dekódolni a handshake-et; hiba esetén blokkoljuk az IP-t.
+    let (server_address, next_state, client_protocol) = match decode_handshake_packet_ext(&buf) {
+        Ok(res) => res,
+        Err(e) => {
+            error!("Handshake dekódolási hiba {}-tól: {}", src_ip, e);
+            block_ip(src_ip);
             let _ = client_stream.shutdown(Shutdown::Both);
             return;
         }
     };
 
-    // Read the initial handshake data
-    let mut buf = vec![0; 1024];
-    let n = match client_stream.read(&mut buf) {
-        Ok(n) => n,
-        Err(e) => {
-            error!("Read error: {}", e);
-            return;
+    // 4. Állapítsuk meg a kérést: ping (status) vagy login.
+    match next_state {
+        1 => {
+            // Ping/Status kérelem: ellenőrizzük a rate limitet.
+            if let Some(cfg) = resolve(&server_address) {
+                if !check_ping_limit(&server_address, src_ip, &cfg) {
+                    error!("Túl sok ping a(z) {}-hez {}-tól", server_address, src_ip);
+                    block_ip(src_ip);
+                    let _ = client_stream.shutdown(Shutdown::Both);
+                    return;
+                }
+            }
+            // Válasz a status lekérdezésre.
+            let response = if let Some(status_json) =
+                pinger::STATUS_CACHE.lock().unwrap().get(&server_address).cloned()
+            {
+                send_status_response(&mut client_stream, &status_json, client_protocol)
+            } else {
+                send_fallback_status_response(&mut client_stream)
+            };
+            if let Err(e) = response {
+                error!("Status válasz küldési hiba: {}", e);
+            }
         }
-    };
-    if n == 0 {
-        return;
-    }
-
-    // Attempt to parse the handshake
-    match decode_handshake_packet_ext(&buf[..n]) {
-        Ok((server_address, next_state, client_protocol)) => {
-            if next_state == 1 {
-                // next_state=1 => status request (ping)
-                info!("Status request for {}", server_address);
-
-                // If the domain is known, check the ping limit for this src_ip
-                if let Some(cfg) = resolve(&server_address) {
-                    if !check_ping_limit(&server_address, src_ip, &cfg) {
-                        error!(
-                            "Too many pings for domain '{}' from IP {}, dropping with no response",
-                            server_address, src_ip
-                        );
-                        // We do NOT send fallback or any response. We just close.
+        2 => {
+            // Login kérelem: ellenőrizzük a domain szűrőt és a kapcsolat rate-limitet.
+            if let Some(redirection_cfg) = resolve(&server_address) {
+                if to_domain_filter(&src_ip, &server_address) {
+                    info!("{}-tól érkező kapcsolat a {} domain esetén letiltva domain filter miatt", src_ip, server_address);
+                    let _ = client_stream.shutdown(Shutdown::Both);
+                    return;
+                }
+                if let Some(_guard) = try_register_connection(&server_address) {
+                    if !check_encryption_if_needed(&redirection_cfg) {
+                        error!("Encryption check sikertelen a {} domainnál", server_address);
                         let _ = client_stream.shutdown(Shutdown::Both);
                         return;
                     }
-                }
-
-                // Under the limit => proceed to serve the status
-                let cached = pinger::STATUS_CACHE.lock().unwrap().get(&server_address).cloned();
-                let res = if let Some(status_json) = cached {
-                    send_status_response(&mut client_stream, &status_json, client_protocol)
-                } else {
-                    send_fallback_status_response(&mut client_stream)
-                };
-                if let Err(e) = res {
-                    error!("Failed to send status response: {}", e);
-                }
-            } else if next_state == 2 {
-                // next_state=2 => actual login
-                if let Some(redirection_cfg) = resolve(&server_address) {
-                    if to_domain_filter(&src_ip, &server_address) {
-                        info!("Connection from {} to {} blocked by domain filter", src_ip, server_address);
-                        let _ = client_stream.shutdown(Shutdown::Both);
-                        return;
-                    }
-                    // Check "connections per second" rate-limit
-                    if let Some(_guard) = try_register_connection(&server_address) {
-                        // Optional encryption check
-                        if !check_encryption_if_needed(&redirection_cfg) {
-                            info!("Encryption check failed for '{}'", server_address);
+                    // Csatlakozás a cél szerverhez
+                    let proxy_to = SocketAddr::new(redirection_cfg.ip.into(), redirection_cfg.port);
+                    match TcpStream::connect(proxy_to) {
+                        Ok(mut target_stream) => {
+                            if let Err(e) = target_stream.set_nodelay(true) {
+                                error!("Nagle kikapcsolási hiba a target-en: {}", e);
+                            }
+                            if let (Ok(src_addr), Ok(dst_addr)) = (client_stream.peer_addr(), target_stream.peer_addr()) {
+                                let new_buf = encapsulate_with_proxy_protocol(src_addr, dst_addr, &buf);
+                                send_initial_buffer_to_target(&new_buf, &mut target_stream);
+                            }
+                            // Kétirányú adatátvitel két külön szálon
+                            let target_clone = match target_stream.try_clone() {
+                                Ok(tc) => tc,
+                                Err(e) => {
+                                    error!("Target stream klónozási hiba: {}", e);
+                                    return;
+                                }
+                            };
+                            let client_clone = match client_stream.try_clone() {
+                                Ok(cc) => cc,
+                                Err(e) => {
+                                    error!("Client stream klónozási hiba: {}", e);
+                                    return;
+                                }
+                            };
+                            let domain_clone = server_address.clone();
+                            thread::spawn(move || forward_loop(client_clone, target_stream, server_address, src_ip, true, "client->target"));
+                            thread::spawn(move || forward_loop(target_clone, client_stream, domain_clone, src_ip, false, "target->client"));
+                        }
+                        Err(e) => {
+                            error!("Cél szerverhez való kapcsolódás hiba {} esetén: {}", server_address, e);
                             let _ = client_stream.shutdown(Shutdown::Both);
-                            return;
                         }
-                        // Connect to the actual target
-                        let proxy_to = SocketAddr::new(redirection_cfg.ip.into(), redirection_cfg.port);
-                        match TcpStream::connect(proxy_to) {
-                            Ok(mut target_stream) => {
-                                if let Err(e) = target_stream.set_nodelay(true) {
-                                    error!("Failed to disable Nagle on target: {}", e);
-                                }
-                                // Optionally send Proxy Protocol header
-                                if let (Ok(src_addr), Ok(dst_addr)) = (client_stream.peer_addr(), target_stream.peer_addr()) {
-                                    let new_buf = encapsulate_with_proxy_protocol(src_addr, dst_addr, &buf[..n]);
-                                    send_initial_buffer_to_target(&new_buf, &mut target_stream);
-                                }
-                                // Clone streams for bidirectional forward
-                                let target_clone = match target_stream.try_clone() {
-                                    Ok(tc) => tc,
-                                    Err(e) => {
-                                        error!("Clone error: {}", e);
-                                        return;
-                                    }
-                                };
-                                let client_clone = match client_stream.try_clone() {
-                                    Ok(cc) => cc,
-                                    Err(e) => {
-                                        error!("Clone error: {}", e);
-                                        return;
-                                    }
-                                };
-
-                                // Need two clones of the domain so we avoid E0382
-                                let domain_for_forward_1 = server_address.clone();
-                                let domain_for_forward_2 = server_address.clone();
-
-                                // Two threads to handle data in each direction
-                                thread::spawn(move || forward_loop(
-                                    client_clone,
-                                    target_stream,
-                                    domain_for_forward_1,
-                                    src_ip,
-                                    "client->target"
-                                ));
-                                thread::spawn(move || forward_loop(
-                                    target_clone,
-                                    client_stream,
-                                    domain_for_forward_2,
-                                    src_ip,
-                                    "target->client"
-                                ));
-                            }
-                            Err(e) => {
-                                error!("Failed to connect to target {}: {}", server_address, e);
-                                let _ = client_stream.shutdown(Shutdown::Both);
-                            }
-                        }
-                    } else {
-                        info!("Rate limit exceeded for domain '{}'", server_address);
-                        let _ = client_stream.shutdown(Shutdown::Both);
                     }
                 } else {
-                    info!("No redirection found for '{}', sending fallback status", server_address);
-                    let _ = send_fallback_status_response(&mut client_stream);
+                    error!("Kapcsolat rate limit túllépve a {} domainnál", server_address);
+                    block_ip(src_ip);
+                    let _ = client_stream.shutdown(Shutdown::Both);
+                }
+            } else {
+                info!("Nincs redirection konfiguráció a {} domainre, fallback válasz", server_address);
+                if let Err(e) = send_fallback_status_response(&mut client_stream) {
+                    error!("Fallback válasz küldési hiba: {}", e);
                 }
             }
         }
-        Err(e) => error!("Handshake decode error: {}", e),
+        other => {
+            error!("Ismeretlen next_state ({}) {}-tól a {} domainnál", other, src_ip, server_address);
+            let _ = client_stream.shutdown(Shutdown::Both);
+        }
     }
 }
+
 
 /// Forwards data from `from` to `to` in a loop, checking the packet limit each time.
 fn forward_loop(
@@ -273,19 +285,23 @@ fn forward_loop(
     mut to: TcpStream,
     domain: String,
     src_ip: IpAddr,
+    client_to_server:  bool,
     tag: &str,
 ) {
     let mut buf = [0u8; 2048];
     loop {
         match from.read(&mut buf) {
             Ok(n) if n > 0 => {
-                if let Some(cfg) = resolve(&domain) {
-                    if !check_packet_limit(&domain, src_ip, &cfg) {
-                        error!(
+                if(client_to_server){
+                    if let Some(cfg) = resolve(&domain) {
+                        if !check_packet_limit(&domain, src_ip, &cfg) {
+                            error!(
                             "{}: domain '{}' from IP {} exceeded max_packet_per_second",
                             tag, domain, src_ip
                         );
-                        break;
+                            block_ip(src_ip);
+                            break;
+                        }
                     }
                 }
                 if to.write_all(&buf[..n]).is_err() {
