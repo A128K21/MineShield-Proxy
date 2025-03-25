@@ -59,7 +59,14 @@
     
     # Number of threads to use for the proxy (only used at startup)
     proxy_threads: 4
+   
+    # ntfy integration "ntfy.sh" "xy-topic" leave blank if disabled.
+    ntfy_server: ""
+    ntfy_topic: ""
     
+    # Debug messages for proxy development
+    debug: false
+
     # Where should we route incoming connections?
     redirections:
     - incoming_domain: "localhost"
