@@ -26,8 +26,11 @@
 
 
 ## Flowchart
-![FlowChart](https://i.ibb.co/3yZZBMq2/K-perny-k-p-2025-03-24-222420.png)
-
+![FlowChart](https://i.ibb.co/Z6PW1ZNy/Untitled-diagram-2025-03-09-100419.png)
+---
+## Example ntfy.sh
+<img src="https://i.ibb.co/zTBF6Wz9/Screenshot-20250325-190525-ntfy.jpg" width="300"/>
+---
 
 ## Getting Started
 
@@ -57,7 +60,7 @@
     # Where should the proxy listen for connections?
     bind-address: "127.0.0.1:25565"
     
-    # Number of threads to use for the proxy
+    # Number of threads to use for the proxy (only used at startup)
     proxy_threads: 4
    
     # ntfy integration "ntfy.sh" "xy-topic" leave blank if disabled.
@@ -73,7 +76,7 @@
       target: "127.0.0.1:25577"
       # Max packets/second before kicking. 0 = none
       max_packet_per_second: 0
-      # Max ping responses/second from cache per a single source. 0 = unlimited
+      # Max ping responses/second from cache
       max_ping_response_per_second: 0
       # Maximum connections per second from a single source. 0 = unlimited
       max_connections_per_second: 0
@@ -82,7 +85,7 @@
       target: "target.local:25678"
       # Max packets/second before kicking. 0 = none
       max_packet_per_second: 100
-      # Max ping responses/second from cache per a single source. 0 = unlimited
+      # Max ping responses/second from cache
       max_ping_response_per_second: 100
       # Maximum connections per second from a single source. 0 = unlimited
       max_connections_per_second: 5
