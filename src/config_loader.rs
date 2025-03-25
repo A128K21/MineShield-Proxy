@@ -208,9 +208,9 @@ bind-address: "127.0.0.1:25565"
 # Number of threads to use for the proxy (only used at startup)
 proxy_threads: 4
 
-# ntfy integration
-ntfy_server: "https://ntfy.sh"
-ntfy_topic: "xy-topic"
+# ntfy integration "ntfy.sh" "xy-topic" leave blank if disabled.
+ntfy_server: ""
+ntfy_topic: ""
 
 # Debug messages for proxy development
 debug: false
