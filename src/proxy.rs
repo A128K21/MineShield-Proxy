@@ -4,8 +4,7 @@
 use std::io::{self, Cursor, Read, Write};
 use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::thread;
-use std::collections::HashMap;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use byteorder::{BigEndian, ReadBytesExt};
 use proxy_protocol::{
     version2::{ProxyAddresses, ProxyCommand, ProxyTransportProtocol},
@@ -13,27 +12,60 @@ use proxy_protocol::{
 };
 use rayon::ThreadPoolBuilder;
 use serde_json::Value;
-use log::{debug, error, info};
+use log::{error, info, debug};
 use lazy_static::lazy_static;
+use std::process::Command;
 use std::sync::Mutex;
+// Additional dependency for concurrent maps
+use dashmap::DashMap;
 
 use crate::config_loader::{
-    resolve, RedirectionConfig, PROXY_THREADS, BIND_ADDRESS,
+    resolve, RedirectionConfig, PROXY_THREADS, BIND_ADDRESS, DEBUG,
 };
-use crate::{forwarding, target_pinger};
+use crate::{forwarding, send_ntfy_notification, target_pinger};
 
 // ===========================================
-// Variable maps
+// Helper Macros for Conditional Logging
 // ===========================================
-lazy_static! {
-    // (IpAddr) -> (block_expiry_timestamp)
-    pub static ref BLOCKED_IPS: Mutex<HashMap<IpAddr, u64>> = Mutex::new(HashMap::new());
-    // (domain, source_ip) -> (timestamp_in_seconds, ping_count_this_second)
-    static ref DOMAIN_SRC_PING_COUNT: Mutex<HashMap<(String, IpAddr), (u64, usize)>> = Mutex::new(HashMap::new());
-    // (domain, source_ip) -> (timestamp_in_seconds, ping_count_this_second)
-    static ref DOMAIN_SRC_CONN_COUNT: Mutex<HashMap<(String, IpAddr), (u64, usize)>> = Mutex::new(HashMap::new());
+macro_rules! log_error {
+    ($($arg:tt)*) => {{
+         if *DEBUG.lock().unwrap() {
+             error!($($arg)*);
+         }
+    }};
 }
 
+macro_rules! log_info {
+    ($($arg:tt)*) => {{
+         if *DEBUG.lock().unwrap() {
+             info!($($arg)*);
+         }
+    }};
+}
+
+macro_rules! log_debug {
+    ($($arg:tt)*) => {{
+         if *DEBUG.lock().unwrap() {
+             debug!($($arg)*);
+         }
+    }};
+}
+
+// ===========================================
+// Global Concurrent Maps using DashMap
+// ===========================================
+lazy_static! {
+    // Blocked IPs map: IpAddr -> expiry timestamp
+    pub static ref BLOCKED_IPS: DashMap<IpAddr, u64> = DashMap::new();
+    // (domain, source_ip) -> (timestamp_in_seconds, ping_count_this_second)
+    static ref DOMAIN_SRC_PING_COUNT: DashMap<(String, IpAddr), (u64, usize)> = DashMap::new();
+    // (domain, source_ip) -> (timestamp_in_seconds, connection_count_this_second)
+    static ref DOMAIN_SRC_CONN_COUNT: DashMap<(String, IpAddr), (u64, usize)> = DashMap::new();
+    // Global last notification time for rate-limiting ntfy messages (in seconds)
+    static ref LAST_NTFY_TIME: Mutex<u64> = Mutex::new(0);
+    // A dedicated thread pool for bidirectional forwarding (size adjustable)
+    static ref FORWARDING_POOL: rayon::ThreadPool = ThreadPoolBuilder::new().num_threads(50).build().unwrap();
+}
 
 // ===========================================
 // Main Proxy Struct & Entry Point
@@ -53,15 +85,18 @@ impl TcpProxy {
         let forward_thread = thread::spawn(move || {
             for stream_result in listener.incoming() {
                 match stream_result {
-                    Ok(stream) => {
+                    Ok(mut stream) => {
                         // Disable Nagle for lower latency
                         if let Err(e) = stream.set_nodelay(true) {
-                            error!("Failed to disable Nagle: {}", e);
+                            log_error!("Failed to disable Nagle: {}", e);
                         }
+                        // Set a read timeout to mitigate slowloris-style attacks.
+                        let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+
                         let src_ip = match stream.peer_addr() {
                             Ok(addr) => addr.ip(),
                             Err(e) => {
-                                error!("Failed to get peer address: {}", e);
+                                log_error!("Failed to get peer address: {}", e);
                                 let _ = stream.shutdown(Shutdown::Both);
                                 continue;
                             }
@@ -72,7 +107,7 @@ impl TcpProxy {
                         }
                         pool.spawn(|| handle_client(stream));
                     }
-                    Err(e) => error!("Accept error: {}", e),
+                    Err(e) => log_error!("Accept error: {}", e),
                 }
             }
         });
@@ -89,7 +124,7 @@ fn handle_client(mut client_stream: TcpStream) {
     let src_ip = match client_stream.peer_addr() {
         Ok(addr) => addr.ip(),
         Err(e) => {
-            error!("Failed to get peer address: {}", e);
+            log_error!("Failed to get peer address: {}", e);
             let _ = client_stream.shutdown(Shutdown::Both);
             return;
         }
@@ -105,7 +140,7 @@ fn handle_client(mut client_stream: TcpStream) {
         Ok(n) if n > 0 => n,
         Ok(_) => return, // EOF reached
         Err(e) => {
-            error!("Read error from {}: {}", src_ip, e);
+            log_error!("Read error from {}: {}", src_ip, e);
             let _ = client_stream.shutdown(Shutdown::Both);
             return;
         }
@@ -116,7 +151,12 @@ fn handle_client(mut client_stream: TcpStream) {
     let (server_address, next_state, client_protocol) = match decode_handshake_packet_ext(&buf) {
         Ok(res) => res,
         Err(e) => {
-            error!("Handshake decoding error from {}: {}", src_ip, e);
+            let err_msg = format!(
+                "Handshake decoding error from {}: {}. Mitigating potential attack, blocking ip for 300 secs",
+                src_ip, e
+            );
+            log_error!("{}", err_msg);
+            send_ntfy_notification(&err_msg);
             block_ip(src_ip);
             let _ = client_stream.shutdown(Shutdown::Both);
             return;
@@ -129,7 +169,12 @@ fn handle_client(mut client_stream: TcpStream) {
             // Status request: Check rate limiting if a configuration is available.
             if let Some(cfg) = resolve(&server_address) {
                 if !check_ping_limit(&server_address, src_ip, &cfg) {
-                    error!("Too many pings for {} from {}", server_address, src_ip);
+                    let err_msg = format!(
+                        "Too many incoming pings to domain '{}' from IP '{}' mitigating DoS attack, blocking ip for 300 secs",
+                        server_address, src_ip
+                    );
+                    log_error!("{}", err_msg);
+                    send_ntfy_notification(&err_msg);
                     block_ip(src_ip);
                     let _ = client_stream.shutdown(Shutdown::Both);
                     return;
@@ -144,7 +189,7 @@ fn handle_client(mut client_stream: TcpStream) {
                 send_fallback_status_response(&mut client_stream)
             };
             if let Err(e) = response {
-                error!("Error sending status response: {}", e);
+                log_error!("Error sending status response: {}", e);
             }
         }
         2 => {
@@ -156,60 +201,64 @@ fn handle_client(mut client_stream: TcpStream) {
                     match TcpStream::connect(proxy_to) {
                         Ok(mut target_stream) => {
                             if let Err(e) = target_stream.set_nodelay(true) {
-                                error!("Failed to disable Nagle on target: {}", e);
+                                log_error!("Failed to disable Nagle on target: {}", e);
                             }
                             if let (Ok(src_addr), Ok(dst_addr)) = (client_stream.peer_addr(), target_stream.peer_addr()) {
                                 let new_buf = encapsulate_with_proxy_protocol(src_addr, dst_addr, &buf);
                                 send_initial_buffer_to_target(&new_buf, &mut target_stream);
                             }
-                            // Set up bidirectional forwarding on separate threads.
+                            // Use the global FORWARDING_POOL for bidirectional forwarding.
                             let target_clone = match target_stream.try_clone() {
                                 Ok(tc) => tc,
                                 Err(e) => {
-                                    error!("Error cloning target stream: {}", e);
+                                    log_error!("Error cloning target stream: {}", e);
                                     return;
                                 }
                             };
                             let client_clone = match client_stream.try_clone() {
                                 Ok(cc) => cc,
                                 Err(e) => {
-                                    error!("Error cloning client stream: {}", e);
+                                    log_error!("Error cloning client stream: {}", e);
                                     return;
                                 }
                             };
                             let domain_clone = server_address.clone();
-                            thread::spawn(move || {
+                            FORWARDING_POOL.spawn(move || {
                                 forwarding::forward_loop(client_clone, target_stream, server_address, src_ip, true, "client->target")
                             });
-                            thread::spawn(move || {
+                            FORWARDING_POOL.spawn(move || {
                                 forwarding::forward_loop(target_clone, client_stream, domain_clone, src_ip, false, "target->client")
                             });
                         }
                         Err(e) => {
-                            error!("Error connecting to target server for {}: {}", server_address, e);
+                            log_error!("Error connecting to target server for {}: {}", server_address, e);
                             let _ = client_stream.shutdown(Shutdown::Both);
                         }
                     }
                 } else {
-                    error!("Connection rate limit exceeded for {} from {}", server_address, src_ip);
+                    let err_msg = format!(
+                        "Too many incoming connections to domain '{}' from IP '{}' mitigating DoS attack, blocking ip for 300 secs",
+                        server_address, src_ip
+                    );
+                    log_error!("{}", err_msg);
+                    send_ntfy_notification(&err_msg);
                     block_ip(src_ip);
                     let _ = client_stream.shutdown(Shutdown::Both);
                     return;
                 }
             } else {
-                info!("No redirection configuration for domain {}, sending fallback response", server_address);
+                log_info!("No redirection configuration for domain {}, sending fallback response", server_address);
                 if let Err(e) = send_fallback_status_response(&mut client_stream) {
-                    error!("Error sending fallback response: {}", e);
+                    log_error!("Error sending fallback response: {}", e);
                 }
             }
         }
         other => {
-            error!("Unknown next_state ({}) from {} for domain {}", other, src_ip, server_address);
+            log_error!("Unknown next_state ({}) from {} for domain {}", other, src_ip, server_address);
             let _ = client_stream.shutdown(Shutdown::Both);
         }
     }
 }
-
 
 // ===========================================
 // Helper Functions: Handshake Decoding
@@ -288,9 +337,8 @@ fn check_ping_limit(domain: &str, src_ip: IpAddr, cfg: &RedirectionConfig) -> bo
         return true; // unlimited
     }
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-    let mut map = DOMAIN_SRC_PING_COUNT.lock().unwrap();
-    let entry = map.entry((domain.to_string(), src_ip)).or_insert((now, 0));
-
+    let key = (domain.to_string(), src_ip);
+    let mut entry = DOMAIN_SRC_PING_COUNT.entry(key).or_insert((now, 0));
     if entry.0 == now {
         if entry.1 >= limit {
             return false;
@@ -301,18 +349,17 @@ fn check_ping_limit(domain: &str, src_ip: IpAddr, cfg: &RedirectionConfig) -> bo
     }
     true
 }
+
 /// Check or increment the per‑domain + per‑source connection count.
 /// Returns `true` if allowed, or `false` if the limit is exceeded.
 fn check_connection_limit(domain: &str, src_ip: IpAddr, cfg: &RedirectionConfig) -> bool {
-    // Make sure RedirectionConfig includes a field like max_connections_per_second
     let limit = cfg.max_connections_per_second;
     if limit == 0 {
         return true; // unlimited
     }
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-    let mut map = DOMAIN_SRC_CONN_COUNT.lock().unwrap();
-    let entry = map.entry((domain.to_string(), src_ip)).or_insert((now, 0));
-
+    let key = (domain.to_string(), src_ip);
+    let mut entry = DOMAIN_SRC_CONN_COUNT.entry(key).or_insert((now, 0));
     if entry.0 == now {
         if entry.1 >= limit {
             return false;
@@ -327,33 +374,36 @@ fn check_connection_limit(domain: &str, src_ip: IpAddr, cfg: &RedirectionConfig)
 // ===========================================
 // Helper Functions: Blacklist ips
 // ===========================================
-/// Filter incoming connections based on ip
 fn is_ip_blocked(ip: &IpAddr) -> bool {
-    let mut blocked = BLOCKED_IPS.lock().unwrap();
-    if let Some(&expiry) = blocked.get(ip) {
+    if let Some(expiry_ref) = BLOCKED_IPS.get(ip) {
+        let expiry = *expiry_ref;
         if SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() < expiry {
             return true;
         } else {
-            // Remove if expired
-            blocked.remove(ip);
+            BLOCKED_IPS.remove(ip);
         }
     }
     false
 }
+
+
 pub(crate) fn block_ip(ip: IpAddr) {
     let expiry = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() + 300;
-    BLOCKED_IPS.lock().unwrap().insert(ip, expiry);
+    BLOCKED_IPS.insert(ip, expiry);
 }
 
 // ===========================================
 // Helper Functions: Status / Ping Responses
 // ===========================================
 fn send_status_response(stream: &mut TcpStream, status_json: &str, client_protocol: u32) -> io::Result<()> {
-    let adjusted_json = adjust_status_response_for_client(status_json, client_protocol)
-        .unwrap_or_else(|e| {
-            error!("Failed to adjust status response: {}", e);
+    let adjusted_json = match adjust_status_response_for_client(status_json, client_protocol) {
+        Ok(s) => s,
+        Err(e) => {
+            log_error!("Failed to adjust status response: {}", e);
+            // Do not notify here since this is not clearly an incoming attack.
             status_json.to_owned()
-        });
+        }
+    };
 
     // Build the response packet
     let mut resp = Vec::new();
@@ -412,7 +462,7 @@ fn handle_ping(stream: &mut TcpStream) -> io::Result<()> {
         let packet_id = read_varint(stream)?;
         match packet_id {
             0x00 => {
-                debug!("Received additional status request instead of ping");
+                log_debug!("Received additional status request instead of ping");
             }
             0x01 => {
                 let mut payload = [0u8; 8];
@@ -451,7 +501,7 @@ fn write_varint(mut value: u32, buf: &mut Vec<u8>) {
 
 fn send_initial_buffer_to_target(initial: &[u8], sender: &mut TcpStream) {
     if sender.write_all(initial).is_err() || sender.flush().is_err() {
-        error!("Failed to send initial buffer to target");
+        log_error!("Failed to send initial buffer to target");
+        // Do not notify here since this error does not indicate an incoming attack.
     }
 }
-
