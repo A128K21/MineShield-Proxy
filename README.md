@@ -27,7 +27,10 @@
 
 ## Flowchart
 ![FlowChart](https://i.ibb.co/Z6PW1ZNy/Untitled-diagram-2025-03-09-100419.png)
-
+---
+## Example ntfy.sh
+<img src="https://i.ibb.co/zTBF6Wz9/Screenshot-20250325-190525-ntfy.jpg" width="300"/>
+---
 
 ## Getting Started
 
