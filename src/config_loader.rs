@@ -17,6 +17,10 @@ lazy_static! {
     pub static ref PROXY_THREADS: Mutex<usize> = Mutex::new(4);
     /// Bind address for the proxy (loaded from config)
     pub static ref BIND_ADDRESS: Mutex<SocketAddr> = Mutex::new("0.0.0.0:25565".parse().unwrap());
+    /// ntfy URL composed from ntfy_server and ntfy_topic in the config.
+    pub static ref NTFY_URL: Mutex<String> = Mutex::new(String::new());
+    /// Debug flag read from the config.
+    pub static ref DEBUG: Mutex<bool> = Mutex::new(false);
 }
 
 // ---------- Data structures ----------
@@ -29,6 +33,11 @@ pub struct Config {
     /// Number of threads to use for the proxy. (Only read at startup.)
     #[serde(default = "default_proxy_threads")]
     pub proxy_threads: usize,
+    pub ntfy_server: String,
+    pub ntfy_topic: String,
+    /// Debug flag.
+    #[serde(default)]
+    pub debug: bool,
     /// List of per‑domain redirections
     pub redirections: Vec<Redirection>,
 }
@@ -65,8 +74,6 @@ fn default_proxy_threads() -> usize {
     4
 }
 
-
-
 // ---------- Helpers to load config ----------
 
 /// Resolves a host (like "127.0.0.1" or "example.com") to an `Ipv4Addr`.
@@ -99,8 +106,6 @@ fn parse_target(target: &str) -> Result<(Ipv4Addr, u16), String> {
     let ipv4 = convert_to_ipv4(host)?;
     Ok((ipv4, port))
 }
-
-
 
 /// Loads YAML from `config_path` and updates global settings.
 pub fn update_proxies_from_config(config_path: &str) {
@@ -142,7 +147,23 @@ pub fn update_proxies_from_config(config_path: &str) {
         *threads = config.proxy_threads;
     }
 
-    // 3) Parse and store redirections in a map
+    // 3) Update ntfy URL from ntfy_server and ntfy_topic.
+    {
+        let mut ntfy_url = NTFY_URL.lock().unwrap();
+        if config.ntfy_server.trim().is_empty() || config.ntfy_topic.trim().is_empty() {
+            *ntfy_url = String::new();
+        } else {
+            *ntfy_url = format!("{}/{}", config.ntfy_server.trim(), config.ntfy_topic.trim());
+        }
+    }
+
+    // 4) Update debug flag
+    {
+        let mut debug_flag = DEBUG.lock().unwrap();
+        *debug_flag = config.debug;
+    }
+
+    // 5) Parse and store redirections in a map
     let mut new_map = HashMap::new();
     for rd in config.redirections {
         match parse_target(&rd.target) {
@@ -186,6 +207,13 @@ bind-address: "127.0.0.1:25565"
 
 # Number of threads to use for the proxy (only used at startup)
 proxy_threads: 4
+
+# ntfy integration
+ntfy_server: "https://ntfy.sh"
+ntfy_topic: "xy-topic"
+
+# Debug messages for proxy development
+debug: false
 
 # Where should we route incoming connections?
 redirections:

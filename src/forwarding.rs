@@ -9,6 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use lazy_static::lazy_static;
 use log::error;
 use crate::config_loader::{RedirectionConfig, resolve};
+use crate::send_ntfy_notification;
 
 // ===========================================
 // Global State: Packet Count Rate Limiting
@@ -62,14 +63,16 @@ pub(crate) fn forward_loop(
                 if client_to_server {
                     if let Some(cfg) = resolve(&domain) {
                         if !check_packet_limit(&domain, src_ip, &cfg) {
-                            error!(
-                                "{}: domain '{}' from IP {} exceeded max_packet_per_second",
-                                tag, domain, src_ip
+                            let err_msg = format!(
+                                "Too many packets to domain '{}' from IP '{}' mitigating potential attack, blocking ip for 300 secs", domain, src_ip
                             );
+                            error!("{}", err_msg);
                             crate::proxy::block_ip(src_ip);
+                            send_ntfy_notification(&err_msg);
                             break;
                         }
                     }
+
                 }
                 if to.write_all(&buf[..n]).is_err() {
                     error!("{} - write error", tag);
