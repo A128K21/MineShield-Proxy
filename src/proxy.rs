@@ -76,6 +76,15 @@ pub struct TcpProxy {
 
 impl TcpProxy {
     pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
+        // Start a cleanup thread that runs every 10 seconds to remove expired IPs.
+        thread::spawn(|| {
+            loop {
+                let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+                BLOCKED_IPS.retain(|_, &mut expiry| expiry > now);
+                thread::sleep(Duration::from_secs(1));
+            }
+        });
+
         let bind_addr = *BIND_ADDRESS.lock().unwrap();
         let listener = TcpListener::bind(bind_addr)?;
 
@@ -166,7 +175,6 @@ fn handle_client(mut client_stream: TcpStream) {
     // 4. Process based on the request type: status (ping) or login.
     match next_state {
         1 => {
-            // Status request: Check rate limiting if a configuration is available.
             if let Some(cfg) = resolve(&server_address) {
                 if !check_ping_limit(&server_address, src_ip, &cfg) {
                     let err_msg = format!(
@@ -180,7 +188,6 @@ fn handle_client(mut client_stream: TcpStream) {
                     return;
                 }
             }
-            // Send status response.
             let response = if let Some(status_json) =
                 target_pinger::STATUS_CACHE.lock().unwrap().get(&server_address).cloned()
             {
@@ -193,10 +200,8 @@ fn handle_client(mut client_stream: TcpStream) {
             }
         }
         2 => {
-            // Login request: Check domain filtering and connection rate limit.
             if let Some(redirection_cfg) = resolve(&server_address) {
                 if check_connection_limit(&server_address, src_ip, &redirection_cfg) {
-                    // Connect to the target server.
                     let proxy_to = SocketAddr::new(redirection_cfg.ip.into(), redirection_cfg.port);
                     match TcpStream::connect(proxy_to) {
                         Ok(mut target_stream) => {
@@ -207,7 +212,6 @@ fn handle_client(mut client_stream: TcpStream) {
                                 let new_buf = encapsulate_with_proxy_protocol(src_addr, dst_addr, &buf);
                                 send_initial_buffer_to_target(&new_buf, &mut target_stream);
                             }
-                            // Use the global FORWARDING_POOL for bidirectional forwarding.
                             let target_clone = match target_stream.try_clone() {
                                 Ok(tc) => tc,
                                 Err(e) => {
@@ -374,18 +378,11 @@ fn check_connection_limit(domain: &str, src_ip: IpAddr, cfg: &RedirectionConfig)
 // ===========================================
 // Helper Functions: Blacklist ips
 // ===========================================
+// Modified: simply check if the IP exists in the map.
 fn is_ip_blocked(ip: &IpAddr) -> bool {
-    if let Some(expiry_ref) = BLOCKED_IPS.get(ip) {
-        let expiry = *expiry_ref;
-        if SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() < expiry {
-            return true;
-        } else {
-            BLOCKED_IPS.remove(ip);
-        }
-    }
-    false
+    // println!("IP to check {}", ip);
+    BLOCKED_IPS.contains_key(ip)
 }
-
 
 pub(crate) fn block_ip(ip: IpAddr) {
     let expiry = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() + 300;
@@ -400,12 +397,10 @@ fn send_status_response(stream: &mut TcpStream, status_json: &str, client_protoc
         Ok(s) => s,
         Err(e) => {
             log_error!("Failed to adjust status response: {}", e);
-            // Do not notify here since this is not clearly an incoming attack.
             status_json.to_owned()
         }
     };
 
-    // Build the response packet
     let mut resp = Vec::new();
     resp.push(0x00);
     write_varint(adjusted_json.len() as u32, &mut resp);
@@ -415,7 +410,6 @@ fn send_status_response(stream: &mut TcpStream, status_json: &str, client_protoc
     write_varint(resp.len() as u32, &mut packet);
     packet.extend_from_slice(&resp);
 
-    // Send response and then handle ping
     stream.write_all(&packet)?;
     stream.flush()?;
     handle_ping(stream)?;
@@ -502,6 +496,5 @@ fn write_varint(mut value: u32, buf: &mut Vec<u8>) {
 fn send_initial_buffer_to_target(initial: &[u8], sender: &mut TcpStream) {
     if sender.write_all(initial).is_err() || sender.flush().is_err() {
         log_error!("Failed to send initial buffer to target");
-        // Do not notify here since this error does not indicate an incoming attack.
     }
 }
