@@ -7,7 +7,7 @@
 ## Features
 
 - **High Performance:**  
-  Built with Rust and Rayon for efficient concurrency and low-latency networking.
+  Built with Rust for efficient concurrency and low-latency networking.
 
 - **Dynamic Configuration:**  
   Uses a YAML configuration file for easy setup of redirections and advanced features. If no config exists, a default one is automatically generated.
