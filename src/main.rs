@@ -1,27 +1,24 @@
-mod proxy;
 mod config_loader;
-mod target_pinger;
 mod forwarding;
+mod proxy;
+mod target_pinger;
 
 // add the pinger module
 
-use std::collections::HashMap;
-use std::net::IpAddr;
+use crate::config_loader::{BIND_ADDRESS, NTFY_URL};
+use crate::proxy::TcpProxy;
+use lazy_static::lazy_static;
 use std::process::Command;
 use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use lazy_static::lazy_static;
-use crate::proxy::TcpProxy;
-use crate::config_loader::{BIND_ADDRESS, NTFY_URL};
 lazy_static! {
     // Global last notification time for rate-limiting ntfy messages (in seconds).
-    static ref LAST_NTFY_TIME: Mutex<u64> = Mutex::new(0);
+    pub(crate) static ref LAST_NTFY_TIME: Mutex<u64> = Mutex::new(0);
 }
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
-
 
     // Load configuration initially.
     config_loader::update_proxies();
@@ -32,11 +29,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("// On target enable receive proxy-protocol v2.");
     println!("//////////////////////////////////////////////////");
     // Spawn a background thread to update configuration periodically.
-    std::thread::spawn(|| {
-        loop {
-            config_loader::update_proxies();
-            std::thread::sleep(Duration::from_secs(10));
-        }
+    std::thread::spawn(|| loop {
+        config_loader::update_proxies();
+        std::thread::sleep(Duration::from_secs(5));
     });
 
     // Spawn the background pinger thread.
@@ -60,7 +55,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 // ===========================================
 pub fn send_ntfy_notification(message: &str) {
     let message_owned = message.to_owned();
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
     let mut last_time = crate::LAST_NTFY_TIME.lock().unwrap();
     if now <= *last_time {
         // Already sent a notification in the current second, so skip.

@@ -1,18 +1,17 @@
 // ===========================================
 // Imports
 // ===========================================
-use std::collections::HashMap;
-use std::io::{self, Read, Write};
-use std::net::{TcpStream, SocketAddr, Ipv4Addr};
-use std::sync::Mutex;
-use std::time::{Duration, Instant};
 use lazy_static::lazy_static;
-use log::{info, error};
+use log::{error, info};
 use proxy_protocol::{
     version2::{ProxyAddresses, ProxyCommand, ProxyTransportProtocol},
     ProxyHeader,
 };
-use serde_json::Value;
+use std::collections::HashMap;
+use std::io::{self, Read, Write};
+use std::net::{Ipv4Addr, SocketAddr, TcpStream};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 // ===========================================
 // Global State: Status Cache
@@ -37,7 +36,10 @@ pub fn read_varint<R: Read>(reader: &mut R) -> io::Result<u32> {
         result |= ((byte & 0x7F) as u32) << (7 * num_read);
         num_read += 1;
         if num_read > 5 {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "VarInt too long"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "VarInt too long",
+            ));
         }
         if (byte & 0x80) == 0 {
             break;
@@ -74,8 +76,9 @@ pub fn write_string(s: &str, buf: &mut Vec<u8>) {
 /// Builds a Proxy Protocol v2 header given the source and destination addresses.
 pub fn build_proxy_protocol_header(src_addr: SocketAddr, dst_addr: SocketAddr) -> Vec<u8> {
     let proxy_addr = match (src_addr, dst_addr) {
-        (SocketAddr::V4(source), SocketAddr::V4(destination)) => {
-            ProxyAddresses::Ipv4 { source, destination }
+        (SocketAddr::V4(source), SocketAddr::V4(destination)) => ProxyAddresses::Ipv4 {
+            source,
+            destination,
         },
         _ => unreachable!(),
     };
@@ -85,8 +88,8 @@ pub fn build_proxy_protocol_header(src_addr: SocketAddr, dst_addr: SocketAddr) -
         transport_protocol: ProxyTransportProtocol::Stream,
         addresses: proxy_addr,
     })
-        .unwrap()
-        .to_vec()
+    .unwrap()
+    .to_vec()
 }
 
 // ===========================================
@@ -143,13 +146,16 @@ pub fn read_status_response(stream: &mut TcpStream) -> io::Result<String> {
     let mut cursor = std::io::Cursor::new(packet_buf);
     let packet_id = read_varint(&mut cursor)?;
     if packet_id != 0x00 {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid packet id in status response"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Invalid packet id in status response",
+        ));
     }
     let json_length = read_varint(&mut cursor)? as usize;
     let mut json_buf = vec![0u8; json_length];
     cursor.read_exact(&mut json_buf)?;
-    let json = String::from_utf8(json_buf)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let json =
+        String::from_utf8(json_buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     Ok(json)
 }
 
@@ -209,9 +215,13 @@ pub fn ping_target(
 pub fn background_pinger() {
     loop {
         // Clone the redirection map from update_service (domain -> RedirectionConfig)
-        let redirection_map = crate::config_loader::REDIRECTION_MAP.lock().unwrap().clone();
+        let redirection_map: Vec<(String, crate::config_loader::RedirectionConfig)> =
+            crate::config_loader::REDIRECTION_MAP
+                .iter()
+                .map(|e| (e.key().clone(), e.value().clone()))
+                .collect();
 
-        for (domain, redirection_cfg) in redirection_map.iter() {
+        for (domain, redirection_cfg) in redirection_map {
             // Retrieve target IP and port from the configuration.
             let ip = redirection_cfg.ip;
             let port = redirection_cfg.port;
@@ -219,12 +229,15 @@ pub fn background_pinger() {
             // Use protocol version 754 (e.g., for Minecraft 1.16.4+)
             let protocol_version = 754;
 
-            match ping_target(domain, ip, port, protocol_version) {
+            match ping_target(&domain, ip, port, protocol_version) {
                 Ok(status_json) => {
                     info!("Ping successful for '{}'", domain);
                     // Update the JSON status in the cache.
-                    STATUS_CACHE.lock().unwrap().insert(domain.clone(), status_json);
-                },
+                    STATUS_CACHE
+                        .lock()
+                        .unwrap()
+                        .insert(domain.clone(), status_json);
+                }
                 Err(e) => {
                     error!("Ping failed for '{}': {}", domain, e);
                 }
