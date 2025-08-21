@@ -1,24 +1,24 @@
 // ===========================================
 // Imports
 // ===========================================
+use dashmap::DashMap;
 use lazy_static::lazy_static;
 use log::{error, info};
 use proxy_protocol::{
     version2::{ProxyAddresses, ProxyCommand, ProxyTransportProtocol},
     ProxyHeader,
 };
-use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
-use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 // ===========================================
 // Global State: Status Cache
 // ===========================================
 // A global status cache: domain -> latest JSON status.
+// DashMap allows concurrent reads without locking the entire structure.
 lazy_static! {
-    pub static ref STATUS_CACHE: Mutex<HashMap<String, String>> = Mutex::new(HashMap::new());
+    pub static ref STATUS_CACHE: DashMap<String, String> = DashMap::new();
 }
 
 // ===========================================
@@ -233,10 +233,7 @@ pub fn background_pinger() {
                 Ok(status_json) => {
                     info!("Ping successful for '{}'", domain);
                     // Update the JSON status in the cache.
-                    STATUS_CACHE
-                        .lock()
-                        .unwrap()
-                        .insert(domain.clone(), status_json);
+                    STATUS_CACHE.insert(domain.clone(), status_json);
                 }
                 Err(e) => {
                     error!("Ping failed for '{}': {}", domain, e);

@@ -61,8 +61,8 @@ lazy_static! {
     // could theoretically grow with every reachable IPv4/domain pair.
     // (domain, source_ip) -> (timestamp_in_seconds, untrusted_conn_count, trusted_conn_count)
     static ref DOMAIN_SRC_CONN_COUNT: DashMap<(String, IpAddr), (u64, usize, usize)> = DashMap::new();
-    // Active connections we track to decide trust promotion
-    static ref ACTIVE_CONNECTIONS: DashMap<SocketAddr, ()> = DashMap::new();
+    // Active connections we track with their start time to decide trust promotion
+    static ref ACTIVE_CONNECTIONS: DashMap<SocketAddr, Instant> = DashMap::new();
     // IPs considered trusted (having at least one 2+ minute connection) with last-seen time
     static ref TRUSTED_IPS: DashMap<IpAddr, Instant> = DashMap::new();
     // A dedicated thread pool for bidirectional forwarding (size adjustable)
@@ -70,6 +70,7 @@ lazy_static! {
 }
 
 const TRUSTED_IP_IDLE_SECS: u64 = 600;
+const CONNECT_TIMEOUT_SECS: u64 = 5;
 
 // ===========================================
 // Main Proxy Struct & Entry Point
@@ -82,15 +83,23 @@ impl TcpProxy {
     pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
         // Start cleanup thread for rate-limit maps and expired blocks
         thread::spawn(|| loop {
-            let now = SystemTime::now()
+            let now_secs = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_secs();
-            BLOCKED_IPS.retain(|_, &mut expiry| expiry > now);
+            BLOCKED_IPS.retain(|_, &mut expiry| expiry > now_secs);
             // Keep entries from the current and previous second to avoid
             // interfering with in-flight operations that span a second boundary.
-            DOMAIN_SRC_PING_COUNT.retain(|_, v| v.0 + 1 >= now);
-            DOMAIN_SRC_CONN_COUNT.retain(|_, v| v.0 + 1 >= now);
+            DOMAIN_SRC_PING_COUNT.retain(|_, v| v.0 + 1 >= now_secs);
+            DOMAIN_SRC_CONN_COUNT.retain(|_, v| v.0 + 1 >= now_secs);
+
+            let now_inst = Instant::now();
+            for kv in ACTIVE_CONNECTIONS.iter() {
+                if now_inst.duration_since(*kv.value()) >= Duration::from_secs(120) {
+                    TRUSTED_IPS.insert(kv.key().ip(), now_inst);
+                }
+            }
+
             thread::sleep(Duration::from_secs(1));
         });
 
@@ -211,10 +220,8 @@ fn handle_client(mut client_stream: TcpStream) {
                 }
             }
             let response = if let Some(status_json) = target_pinger::STATUS_CACHE
-                .lock()
-                .unwrap()
                 .get(&server_address)
-                .cloned()
+                .map(|v| v.value().clone())
             {
                 send_status_response(&mut client_stream, &status_json, client_protocol)
             } else {
@@ -229,7 +236,10 @@ fn handle_client(mut client_stream: TcpStream) {
                 let redirection_cfg = Arc::new(redirection_cfg);
                 if check_connection_limit(&server_address, src_ip, &redirection_cfg) {
                     let proxy_to = SocketAddr::new(redirection_cfg.ip.into(), redirection_cfg.port);
-                    match TcpStream::connect(proxy_to) {
+                    match TcpStream::connect_timeout(
+                        &proxy_to,
+                        Duration::from_secs(CONNECT_TIMEOUT_SECS),
+                    ) {
                         Ok(mut target_stream) => {
                             if let Err(e) = target_stream.set_nodelay(true) {
                                 log_error!("Failed to disable Nagle on target: {}", e);
@@ -255,15 +265,7 @@ fn handle_client(mut client_stream: TcpStream) {
                                     return;
                                 }
                             };
-                            ACTIVE_CONNECTIONS.insert(src_addr, ());
-                            let src_addr_trust = src_addr;
-                            let src_ip_trust = src_ip;
-                            thread::spawn(move || {
-                                thread::sleep(Duration::from_secs(120));
-                                if ACTIVE_CONNECTIONS.contains_key(&src_addr_trust) {
-                                    TRUSTED_IPS.insert(src_ip_trust, Instant::now());
-                                }
-                            });
+                            ACTIVE_CONNECTIONS.insert(src_addr, Instant::now());
                             let domain_clone = server_address.clone();
                             let src_addr_clone1 = src_addr;
                             let src_addr_clone2 = src_addr;
