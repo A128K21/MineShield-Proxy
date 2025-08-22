@@ -35,8 +35,23 @@ if [ ! -f "$JAR" ]; then
   curl -fsSL -H "User-Agent: ${USER_AGENT}" -o "$JAR" "$URL"
 fi
 
-# Minimal server configuration with Proxy Protocol enabled
+# Accept EULA
 echo 'eula=true' >"$SERVER_DIR/eula.txt"
+
+# Start once to generate default configs
+echo "initializing Paper server"
+java -Xms64M -Xmx256M -jar "$JAR" nogui >/tmp/paper_init.log &
+INIT_PID=$!
+for i in $(seq 1 30); do
+  if [ -f "$SERVER_DIR/config/paper-global.yml" ]; then
+    break
+  fi
+  sleep 1
+done
+kill "$INIT_PID" 2>/dev/null || true
+wait "$INIT_PID" 2>/dev/null || true
+
+# Configure server to use Proxy Protocol
 cat >"$SERVER_DIR/server.properties" <<'EOL'
 server-port=25581
 online-mode=false
@@ -46,9 +61,13 @@ EOL
 mkdir -p "$SERVER_DIR/config"
 cat >"$SERVER_DIR/config/paper-global.yml" <<'EOL'
 proxies:
-  proxy-protocol:
-    enabled: true
-    require: false
+  bungee-cord:
+    online-mode: true
+  proxy-protocol: true
+  velocity:
+    enabled: false
+    online-mode: true
+    secret: ''
 EOL
 
 # Copy proxy config
@@ -56,7 +75,20 @@ cp "$DIR/config.yml" "$ROOT/config.yml"
 
 # Start Paper server
 java -Xms64M -Xmx256M -jar "$JAR" nogui >/tmp/paper.log &
-sleep 20
+
+# Wait for server port to open (max 60s)
+echo "waiting for paper server to start"
+for i in $(seq 1 60); do
+  if (echo >"/dev/tcp/127.0.0.1/25581") >/dev/null 2>&1; then
+    break
+  fi
+  sleep 1
+done
+if ! (echo >"/dev/tcp/127.0.0.1/25581") >/dev/null 2>&1; then
+  echo "paper server failed to start" >&2
+  cat /tmp/paper.log >&2
+  exit 1
+fi
 
 # Start proxy
 "$ROOT/target/debug/mineshieldv2-proxy" &
