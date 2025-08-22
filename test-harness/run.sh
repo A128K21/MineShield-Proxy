@@ -55,7 +55,7 @@ EOL
 cp "$DIR/config.yml" "$ROOT/config.yml"
 
 # Start Paper server
-java -Xms64M -Xmx256M -jar "$JAR" nogui >/tmp/paper.log &
+java -Xms64M -Xmx1024M -jar "$JAR" nogui >/tmp/paper.log &
 sleep 20
 
 # Start proxy
