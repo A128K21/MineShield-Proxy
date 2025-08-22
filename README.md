@@ -25,7 +25,7 @@
   The proxy pings the target servers in every second and keeps it's cache up to date.
 
 - **Persistent IP state:**
-  Blocked and trusted IP information is stored in a SQLite database so bans survive restarts.
+  Blocked and trusted IP information is stored in a SQLite database.
 
 
 ## Flowchart
