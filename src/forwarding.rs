@@ -6,11 +6,11 @@ use crate::send_ntfy_notification;
 use dashmap::DashMap;
 use lazy_static::lazy_static;
 use log::error;
-use std::io::{Read, Write};
-use std::net::{IpAddr, Shutdown, SocketAddr, TcpStream};
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 // ===========================================
 // Global State: Packet Count Rate Limiting
@@ -54,19 +54,23 @@ fn check_packet_limit(domain: &str, src_ip: IpAddr, cfg: &RedirectionConfig) -> 
 // Forwarding Loop
 // ===========================================
 /// Forwards data from `from` to `to` in a loop, checking the packet limit each time.
-pub(crate) fn forward_loop(
-    mut from: TcpStream,
-    mut to: TcpStream,
+pub(crate) async fn forward_loop<R, W>(
+    mut from: R,
+    mut to: W,
     domain: String,
     cfg: Arc<RedirectionConfig>,
     src_ip: IpAddr,
     src_addr: SocketAddr,
     client_to_server: bool,
-    tag: &str,
-) {
+    tag: &'static str,
+)
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
     let mut buf = [0u8; 2048];
     loop {
-        match from.read(&mut buf) {
+        match from.read(&mut buf).await {
             Ok(n) if n > 0 => {
                 if client_to_server {
                     if !check_packet_limit(&domain, src_ip, &cfg) {
@@ -80,19 +84,19 @@ pub(crate) fn forward_loop(
                         break;
                     }
                 }
-                if to.write_all(&buf[..n]).is_err() {
-                    error!("{} - write error", tag);
+                if let Err(e) = to.write_all(&buf[..n]).await {
+                    error!("{} - write error: {}", tag, e);
                     break;
                 }
             }
-            Ok(_) => break, // 0 bytes read => EOF
+            Ok(_) => break, // EOF
             Err(e) => {
                 error!("{} - read error: {}", tag, e);
                 break;
             }
         }
     }
-    let _ = to.shutdown(Shutdown::Write);
+    let _ = to.shutdown().await;
     crate::proxy::finish_connection(src_addr);
 }
 

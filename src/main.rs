@@ -40,10 +40,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // Start the TCP proxy.
-    match TcpProxy::new() {
+    match TcpProxy::new().await {
         Ok(proxy) => {
             log::info!("TCP Proxy started successfully.");
-            proxy.forward_thread.join().unwrap();
+            proxy.forward_task.await.unwrap();
         }
         Err(e) => log::error!("Failed to start TCP Proxy: {}", e),
     }

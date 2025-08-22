@@ -1,0 +1,29 @@
+name: Integration Test
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+      - name: Verify Java
+        run: java -version
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+      - name: Build
+        run: cargo build
+      - name: Unit tests
+        run: cargo test
+      - name: Integration test
+        run: ./test-harness/run.sh
