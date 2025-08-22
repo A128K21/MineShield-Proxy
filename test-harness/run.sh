@@ -2,11 +2,6 @@
 set -euo pipefail
 
 # Integration test harness for MineShield proxy against PaperMC
-# Notes:
-# - Uses official Paper v2 API to fetch the latest build of 1.21.1
-# - Captures both stdout and stderr to logs
-# - Waits up to 240s for startup and matches the modern "Done (...)! For help, type \"help\"" line
-# - Allocates a bit more heap to reduce CI startup variance
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$DIR/.."
@@ -14,7 +9,6 @@ SERVER_DIR="$DIR/paper-server"
 JAR="$SERVER_DIR/paper.jar"
 
 cleanup() {
-  # Kill any children of this script and remove copied config
   pkill -P $$ || true
   rm -f "$ROOT/config.yml"
 }
@@ -24,7 +18,6 @@ BOT_COUNT=${BOT_COUNT:-50}
 
 wait_for_paper() {
   local log_file="$1"
-  # Look for the canonical "Done (...)! For help, type "help"" line, but also accept the fallback.
   for _ in {1..240}; do
     if grep -Eq 'Done \([0-9.]+s\)! For help, type "help"|For help, type "help"' "$log_file" 2>/dev/null; then
       return 0
@@ -41,13 +34,12 @@ cargo build >/tmp/proxy_build.log 2>&1
 # Install npm dependencies for the test harness
 npm --prefix "$DIR" install >/tmp/npm_install.log 2>&1
 
-# Download PaperMC if needed (latest build for 1.21.1)
+# Download latest Paper build for 1.21.1 if needed (official v2 API)
 if [ ! -f "$JAR" ]; then
   mkdir -p "$SERVER_DIR"
   echo "downloading PaperMC 1.21.1 (latest build)"
   USER_AGENT="mineshield-test/1.0 (+https://example.com/contact)"
   API="https://api.papermc.io/v2/projects/paper/versions/1.21.1/builds"
-  # Pick the highest build number and construct the download URL for the application jar
   URL=$(
     curl -fsSL -H "User-Agent: ${USER_AGENT}" "$API" \
       | jq -r '.builds | sort_by(.build) | .[-1] as $b
@@ -60,7 +52,7 @@ if [ ! -f "$JAR" ]; then
   curl -fsSL -H "User-Agent: ${USER_AGENT}" -o "$JAR" "$URL"
 fi
 
-# Prepare minimal server configuration and generate defaults
+# Minimal server configuration
 echo 'eula=true' >"$SERVER_DIR/eula.txt"
 cat >"$SERVER_DIR/server.properties" <<'EOL'
 server-port=25581
@@ -68,16 +60,20 @@ online-mode=false
 motd=Test Server
 EOL
 
-# First start to generate config files
+# First start to generate configs
 INIT_LOG=/tmp/paper_init.log
 : >"$INIT_LOG"
-(java -Xms256M -Xmx2G -jar "$JAR" --nogui >"$INIT_LOG" 2>&1) &
+( cd "$SERVER_DIR" && java -Xms256M -Xmx2G -jar ./paper.jar --nogui >"$INIT_LOG" 2>&1 ) &
 INIT_PID=$!
-wait_for_paper "$INIT_LOG" || { echo "Initial Paper boot failed"; exit 1; }
+if ! wait_for_paper "$INIT_LOG"; then
+  echo "Initial Paper boot failed"
+  sed -n '1,200p' "$INIT_LOG" >&2 || true
+  exit 1
+fi
 kill "$INIT_PID" 2>/dev/null || true
 wait "$INIT_PID" 2>/dev/null || true
 
-# Overwrite Paper configuration enabling Proxy Protocol
+# Enable Proxy Protocol in Paper
 mkdir -p "$SERVER_DIR/config"
 cat >"$SERVER_DIR/config/paper-global.yml" <<'EOL'
 proxies:
@@ -90,14 +86,18 @@ proxies:
     secret: ''
 EOL
 
-# Copy proxy config to project root (where the binary reads it from)
+# Copy proxy config for the binary
 cp "$DIR/config.yml" "$ROOT/config.yml"
 
-# Start Paper server for the actual test
+# Start Paper for tests
 RUN_LOG=/tmp/paper.log
 : >"$RUN_LOG"
-(java -Xms256M -Xmx2G -jar "$JAR" --nogui >"$RUN_LOG" 2>&1) &
-wait_for_paper "$RUN_LOG"
+( cd "$SERVER_DIR" && java -Xms256M -Xmx2G -jar ./paper.jar --nogui >"$RUN_LOG" 2>&1 ) &
+if ! wait_for_paper "$RUN_LOG"; then
+  echo "Paper failed to reach ready state"
+  tail -n 400 "$RUN_LOG" >&2 || true
+  exit 1
+fi
 
 # Start proxy
 "$ROOT/target/debug/mineshieldv2-proxy" &
