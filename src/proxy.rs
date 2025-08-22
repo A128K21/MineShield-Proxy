@@ -52,19 +52,28 @@ macro_rules! log_debug {
 // ===========================================
 // Global Concurrent Maps using DashMap
 // ===========================================
+// IP status: 0=blocked,1=regular,2=pinged,3=played>2m,4=played>6m
+#[derive(Clone, Copy)]
+struct IpInfo {
+    status: u8,
+    expiry: Option<u64>,
+}
+
 lazy_static! {
-    // Blocked IPs map: IpAddr -> expiry timestamp
-    pub static ref BLOCKED_IPS: DashMap<IpAddr, u64> = DashMap::new();
+    // Combined IP status map
+    static ref IP_STATUS: DashMap<IpAddr, IpInfo> = DashMap::new();
     // (domain, source_ip) -> (timestamp_in_seconds, ping_count_this_second)
     static ref DOMAIN_SRC_PING_COUNT: DashMap<(String, IpAddr), (u64, usize)> = DashMap::new();
     // These per-(domain, IP) maps are pruned periodically; without cleanup they
     // could theoretically grow with every reachable IPv4/domain pair.
-    // (domain, source_ip) -> (timestamp_in_seconds, untrusted_conn_count, trusted_conn_count)
-    static ref DOMAIN_SRC_CONN_COUNT: DashMap<(String, IpAddr), (u64, usize, usize)> = DashMap::new();
+    // (domain, source_ip) -> (timestamp_in_seconds,
+    //                        regular_conn_count,
+    //                        pinged_conn_count,
+    //                        trusted_2m_conn_count,
+    //                        trusted_6m_conn_count)
+    static ref DOMAIN_SRC_CONN_COUNT: DashMap<(String, IpAddr), (u64, usize, usize, usize, usize)> = DashMap::new();
     // Active connections we track with their start time to decide trust promotion
     static ref ACTIVE_CONNECTIONS: DashMap<SocketAddr, Instant> = DashMap::new();
-    // IPs considered trusted (having at least one 2+ minute connection) with last-seen time
-    static ref TRUSTED_IPS: DashMap<IpAddr, Instant> = DashMap::new();
     // A dedicated thread pool for bidirectional forwarding
     // Uses the same thread count as the listener pool (default 4)
     static ref FORWARDING_POOL: rayon::ThreadPool = ThreadPoolBuilder::new()
@@ -73,7 +82,6 @@ lazy_static! {
         .unwrap();
 }
 
-const TRUSTED_IP_IDLE_SECS: u64 = 600;
 const CONNECT_TIMEOUT_SECS: u64 = 5;
 
 // ===========================================
@@ -91,7 +99,17 @@ impl TcpProxy {
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_secs();
-            BLOCKED_IPS.retain(|_, &mut expiry| expiry > now_secs);
+            IP_STATUS.retain(|_, info| {
+                if info.status == 0 {
+                    if let Some(expiry) = info.expiry {
+                        expiry > now_secs
+                    } else {
+                        false
+                    }
+                } else {
+                    true
+                }
+            });
             // Keep entries from the current and previous second to avoid
             // interfering with in-flight operations that span a second boundary.
             DOMAIN_SRC_PING_COUNT.retain(|_, v| v.0 + 1 >= now_secs);
@@ -99,21 +117,33 @@ impl TcpProxy {
 
             let now_inst = Instant::now();
             for kv in ACTIVE_CONNECTIONS.iter() {
-                if now_inst.duration_since(*kv.value()) >= Duration::from_secs(120) {
-                    TRUSTED_IPS.insert(kv.key().ip(), now_inst);
+                let dur = now_inst.duration_since(*kv.value());
+                let ip = kv.key().ip();
+                if dur >= Duration::from_secs(360) {
+                    IP_STATUS.insert(
+                        ip,
+                        IpInfo {
+                            status: 4,
+                            expiry: None,
+                        },
+                    );
+                } else if dur >= Duration::from_secs(120) {
+                    IP_STATUS
+                        .entry(ip)
+                        .and_modify(|info| {
+                            if info.status < 3 {
+                                info.status = 3;
+                                info.expiry = None;
+                            }
+                        })
+                        .or_insert(IpInfo {
+                            status: 3,
+                            expiry: None,
+                        });
                 }
             }
 
             thread::sleep(Duration::from_secs(1));
-        });
-
-        // Start thread to expire idle trusted IPs
-        thread::spawn(|| loop {
-            let now = Instant::now();
-            TRUSTED_IPS.retain(|_, ts| {
-                now.duration_since(*ts) < Duration::from_secs(TRUSTED_IP_IDLE_SECS)
-            });
-            thread::sleep(Duration::from_secs(60));
         });
 
         // Start packet rate-limit cleanup thread
@@ -223,6 +253,7 @@ fn handle_client(mut client_stream: TcpStream) {
                     return;
                 }
             }
+            record_ping(src_ip);
             let response = if let Some(status_json) = target_pinger::STATUS_CACHE
                 .get(&server_address)
                 .map(|v| v.value().clone())
@@ -457,23 +488,41 @@ fn check_connection_limit(domain: &str, src_ip: IpAddr, cfg: &RedirectionConfig)
         .unwrap()
         .as_secs();
     let key = (domain.to_string(), src_ip);
-    let trusted = TRUSTED_IPS.contains_key(&src_ip);
-    let mut entry = DOMAIN_SRC_CONN_COUNT.entry(key).or_insert((now, 0, 0));
+    let status = IP_STATUS.get(&src_ip).map(|info| info.status).unwrap_or(1);
+    let mut entry = DOMAIN_SRC_CONN_COUNT
+        .entry(key)
+        .or_insert((now, 0, 0, 0, 0));
     if entry.0 != now {
-        *entry = (now, 0, 0);
+        *entry = (now, 0, 0, 0, 0);
     }
-    if trusted {
-        TRUSTED_IPS.insert(src_ip, Instant::now());
-        if entry.2 >= limit {
-            return false;
+    match status {
+        4 => {
+            if entry.4 >= limit {
+                return false;
+            }
+            entry.4 += 1;
         }
-        entry.2 += 1;
-    } else {
-        let allowed = limit.saturating_sub(entry.2);
-        if entry.1 >= allowed {
-            return false;
+        3 => {
+            let allowed = limit.saturating_sub(entry.4);
+            if entry.3 >= allowed {
+                return false;
+            }
+            entry.3 += 1;
         }
-        entry.1 += 1;
+        2 => {
+            let allowed = limit.saturating_sub(entry.4 + entry.3);
+            if entry.2 >= allowed {
+                return false;
+            }
+            entry.2 += 1;
+        }
+        _ => {
+            let allowed = limit.saturating_sub(entry.4 + entry.3 + entry.2);
+            if entry.1 >= allowed {
+                return false;
+            }
+            entry.1 += 1;
+        }
     }
     true
 }
@@ -485,10 +534,23 @@ pub(crate) fn finish_connection(addr: SocketAddr) {
 // ===========================================
 // Helper Functions: Blacklist ips
 // ===========================================
-// Modified: simply check if the IP exists in the map.
+// Check if the IP is currently blocked based on status and expiry
 fn is_ip_blocked(ip: &IpAddr) -> bool {
-    // println!("IP to check {}", ip);
-    BLOCKED_IPS.contains_key(ip)
+    if let Some(info) = IP_STATUS.get(ip) {
+        if info.status == 0 {
+            if let Some(expiry) = info.expiry {
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs();
+                if now < expiry {
+                    return true;
+                }
+            }
+            IP_STATUS.remove(ip);
+        }
+    }
+    false
 }
 
 pub(crate) fn block_ip(ip: IpAddr) {
@@ -497,8 +559,28 @@ pub(crate) fn block_ip(ip: IpAddr) {
         .unwrap()
         .as_secs()
         + 300;
-    BLOCKED_IPS.insert(ip, expiry);
-    TRUSTED_IPS.remove(&ip);
+    IP_STATUS.insert(
+        ip,
+        IpInfo {
+            status: 0,
+            expiry: Some(expiry),
+        },
+    );
+}
+
+fn record_ping(ip: IpAddr) {
+    IP_STATUS
+        .entry(ip)
+        .and_modify(|info| {
+            if info.status != 0 && info.status < 2 {
+                info.status = 2;
+                info.expiry = None;
+            }
+        })
+        .or_insert(IpInfo {
+            status: 2,
+            expiry: None,
+        });
 }
 
 // ===========================================
