@@ -1,12 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Integration test harness for MineShield proxy against PaperMC
+# Notes:
+# - Uses official Paper v2 API to fetch the latest build of 1.21.1
+# - Captures both stdout and stderr to logs
+# - Waits up to 240s for startup and matches the modern "Done (...)! For help, type \"help\"" line
+# - Allocates a bit more heap to reduce CI startup variance
+
 DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$DIR/.."
 SERVER_DIR="$DIR/paper-server"
 JAR="$SERVER_DIR/paper.jar"
 
 cleanup() {
+  # Kill any children of this script and remove copied config
   pkill -P $$ || true
   rm -f "$ROOT/config.yml"
 }
@@ -16,8 +24,9 @@ BOT_COUNT=${BOT_COUNT:-50}
 
 wait_for_paper() {
   local log_file="$1"
-  for _ in {1..120}; do
-    if grep -Fq 'For help, type "help"' "$log_file" 2>/dev/null; then
+  # Look for the canonical "Done (...)! For help, type "help"" line, but also accept the fallback.
+  for _ in {1..240}; do
+    if grep -Eq 'Done \([0-9.]+s\)! For help, type "help"|For help, type "help"' "$log_file" 2>/dev/null; then
       return 0
     fi
     sleep 1
@@ -27,21 +36,25 @@ wait_for_paper() {
 }
 
 # Build proxy
-cargo build >/tmp/proxy_build.log
+cargo build >/tmp/proxy_build.log 2>&1
 
-# Install npm dependencies
-npm --prefix "$DIR" install >/tmp/npm_install.log
+# Install npm dependencies for the test harness
+npm --prefix "$DIR" install >/tmp/npm_install.log 2>&1
 
-# Download PaperMC if needed
+# Download PaperMC if needed (latest build for 1.21.1)
 if [ ! -f "$JAR" ]; then
   mkdir -p "$SERVER_DIR"
-  echo "downloading PaperMC 1.21.1"
+  echo "downloading PaperMC 1.21.1 (latest build)"
   USER_AGENT="mineshield-test/1.0 (+https://example.com/contact)"
-  API="https://fill.papermc.io/v3/projects/paper/versions/1.21.1/builds"
-  URL=$(curl -fsSL -H "User-Agent: ${USER_AGENT}" "${API}" \
-    | jq -r 'first(.[] | select(.channel=="STABLE") | .downloads."server:default".url) // "null"')
-  if [[ "$URL" == "null" ]]; then
-    echo "No stable build found for 1.21.1." >&2
+  API="https://api.papermc.io/v2/projects/paper/versions/1.21.1/builds"
+  # Pick the highest build number and construct the download URL for the application jar
+  URL=$(
+    curl -fsSL -H "User-Agent: ${USER_AGENT}" "$API" \
+      | jq -r '.builds | sort_by(.build) | .[-1] as $b
+               | "https://api.papermc.io/v2/projects/paper/versions/1.21.1/builds/\($b.build)/downloads/\($b.downloads.application.name)"'
+  )
+  if [[ -z "${URL}" || "${URL}" == "null" ]]; then
+    echo "Unable to resolve Paper download URL for 1.21.1." >&2
     exit 1
   fi
   curl -fsSL -H "User-Agent: ${USER_AGENT}" -o "$JAR" "$URL"
@@ -55,12 +68,12 @@ online-mode=false
 motd=Test Server
 EOL
 
-# Start once to generate configuration files
+# First start to generate config files
 INIT_LOG=/tmp/paper_init.log
 : >"$INIT_LOG"
-java -Xms64M -Xmx1024M -jar "$JAR" nogui >"$INIT_LOG" &
+(java -Xms256M -Xmx2G -jar "$JAR" --nogui >"$INIT_LOG" 2>&1) &
 INIT_PID=$!
-wait_for_paper "$INIT_LOG"
+wait_for_paper "$INIT_LOG" || { echo "Initial Paper boot failed"; exit 1; }
 kill "$INIT_PID" 2>/dev/null || true
 wait "$INIT_PID" 2>/dev/null || true
 
@@ -77,13 +90,13 @@ proxies:
     secret: ''
 EOL
 
-# Copy proxy config
+# Copy proxy config to project root (where the binary reads it from)
 cp "$DIR/config.yml" "$ROOT/config.yml"
 
-# Start Paper server
+# Start Paper server for the actual test
 RUN_LOG=/tmp/paper.log
 : >"$RUN_LOG"
-java -Xms64M -Xmx1024M -jar "$JAR" nogui >"$RUN_LOG" &
+(java -Xms256M -Xmx2G -jar "$JAR" --nogui >"$RUN_LOG" 2>&1) &
 wait_for_paper "$RUN_LOG"
 
 # Start proxy
