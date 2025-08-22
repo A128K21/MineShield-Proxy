@@ -15,16 +15,16 @@ jobs:
         uses: actions-rs/toolchain@v1
         with:
           toolchain: stable
-          target: x86_64-unknown-linux-musl
+          target: x86_64-unknown-linux-gnu
           override: true
 
       - name: Build for x86_64
         run: |
-          cargo build --release --target x86_64-unknown-linux-musl
-          ls -la target/x86_64-unknown-linux-musl/release
+          cargo build --release --target x86_64-unknown-linux-gnu
+          ls -la target/x86_64-unknown-linux-gnu/release
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: mineshield-proxy-x86-64-linux
-          path: target/x86_64-unknown-linux-musl/release/mineshieldv2-proxy
+          path: target/x86_64-unknown-linux-gnu/release/mineshieldv2-proxy
