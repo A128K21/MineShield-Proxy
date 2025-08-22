@@ -1,0 +1,10 @@
+bind-address: 127.0.0.1:25580
+proxy-threads: 4
+ntfy_server: ''
+ntfy_topic: ''
+debug: true
+redirections:
+  - incoming_domain: localhost
+    target: 127.0.0.1:25581
+  - incoming_domain: 127.0.0.1
+    target: 127.0.0.1:25581
