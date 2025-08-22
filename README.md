@@ -18,11 +18,14 @@
 - **Configurable Thread Pool:**
   Customize the number of threads used by the proxy (default is 4) for both listener and forwarding pools.
 
-- **Proxy Protocol v2:**  
+- **Proxy Protocol v2:**
   Ensures that your backend servers receive accurate client IP information.
 
-- **MOTD Cacheing**  
+- **MOTD Cacheing**
   The proxy pings the target servers in every second and keeps it's cache up to date.
+
+- **Persistent IP state:**
+  Blocked and trusted IP information is stored in a SQLite database so bans survive restarts.
 
 
 ## Flowchart

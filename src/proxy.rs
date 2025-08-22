@@ -9,7 +9,9 @@ use proxy_protocol::{
     ProxyHeader,
 };
 use rayon::ThreadPoolBuilder;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use rusqlite::{params, Connection};
 use std::io::{self, Cursor, Read, Write};
 use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::Ordering;
@@ -53,7 +55,7 @@ macro_rules! log_debug {
 // Global Concurrent Maps using DashMap
 // ===========================================
 // IP status: 0=blocked,1=regular,2=pinged,3=played>2m,4=played>6m
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Serialize, Deserialize)]
 struct IpInfo {
     status: u8,
     expiry: Option<u64>,
@@ -84,6 +86,109 @@ lazy_static! {
 
 const CONNECT_TIMEOUT_SECS: u64 = 5;
 
+// SQLite database file to persist IP status between restarts
+const IP_STATUS_DB: &str = "ip_status.sqlite";
+
+fn save_ip_status() -> io::Result<()> {
+    let mut conn = Connection::open(IP_STATUS_DB)
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS ip_status (ip TEXT PRIMARY KEY, status INTEGER NOT NULL, expiry INTEGER)",
+        [],
+    )
+    .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+
+    let tx = conn
+        .transaction()
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    tx.execute("DELETE FROM ip_status", [])
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+
+    for kv in IP_STATUS.iter() {
+        let ip_str = kv.key().to_string();
+        let info = *kv.value();
+        tx.execute(
+            "INSERT OR REPLACE INTO ip_status (ip, status, expiry) VALUES (?1, ?2, ?3)",
+            params![ip_str, info.status as i64, info.expiry.map(|e| e as i64)],
+        )
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    }
+
+    tx.commit()
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    Ok(())
+}
+
+fn load_ip_status() -> usize {
+    let conn = match Connection::open(IP_STATUS_DB) {
+        Ok(c) => c,
+        Err(e) => {
+            log_error!("Failed to open {}: {}", IP_STATUS_DB, e);
+            return 0;
+        }
+    };
+
+    if let Err(e) = conn.execute(
+        "CREATE TABLE IF NOT EXISTS ip_status (ip TEXT PRIMARY KEY, status INTEGER NOT NULL, expiry INTEGER)",
+        [],
+    ) {
+        log_error!("Failed to create table {}: {}", IP_STATUS_DB, e);
+        return 0;
+    }
+
+    let mut stmt = match conn.prepare("SELECT ip, status, expiry FROM ip_status") {
+        Ok(s) => s,
+        Err(e) => {
+            log_error!("Failed to query {}: {}", IP_STATUS_DB, e);
+            return 0;
+        }
+    };
+    let rows = match stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, Option<i64>>(2)?))
+    }) {
+        Ok(r) => r,
+        Err(e) => {
+            log_error!("Failed to read {}: {}", IP_STATUS_DB, e);
+            return 0;
+        }
+    };
+
+    let mut count = 0;
+    for row in rows {
+        if let Ok((ip_str, status, expiry_opt)) = row {
+            if let Ok(ip) = ip_str.parse::<IpAddr>() {
+                IP_STATUS.insert(
+                    ip,
+                    IpInfo {
+                        status: status as u8,
+                        expiry: expiry_opt.map(|e| e as u64),
+                    },
+                );
+                count += 1;
+            }
+        }
+    }
+    count
+}
+
+fn purge_blocked_ips() {
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    IP_STATUS.retain(|_, info| {
+        if info.status == 0 {
+            if let Some(expiry) = info.expiry {
+                expiry > now_secs
+            } else {
+                false
+            }
+        } else {
+            true
+        }
+    });
+}
+
 // ===========================================
 // Main Proxy Struct & Entry Point
 // ===========================================
@@ -93,23 +198,29 @@ pub struct TcpProxy {
 
 impl TcpProxy {
     pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
-        // Start cleanup thread for rate-limit maps and expired blocks
+        let loaded = load_ip_status();
+        log_info!("Loaded {} IP(s) from {}", loaded, IP_STATUS_DB);
+        purge_blocked_ips();
+
+        thread::spawn(|| loop {
+            thread::sleep(Duration::from_secs(300));
+            purge_blocked_ips();
+        });
+
+        // Periodically save IP status in a background thread
+        thread::spawn(|| loop {
+            thread::sleep(Duration::from_secs(60));
+            if let Err(e) = save_ip_status() {
+                log_error!("Failed to save IP status: {}", e);
+            }
+        });
+
+        // Start cleanup thread for rate-limit maps and connection promotions
         thread::spawn(|| loop {
             let now_secs = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_secs();
-            IP_STATUS.retain(|_, info| {
-                if info.status == 0 {
-                    if let Some(expiry) = info.expiry {
-                        expiry > now_secs
-                    } else {
-                        false
-                    }
-                } else {
-                    true
-                }
-            });
             // Keep entries from the current and previous second to avoid
             // interfering with in-flight operations that span a second boundary.
             DOMAIN_SRC_PING_COUNT.retain(|_, v| v.0 + 1 >= now_secs);
