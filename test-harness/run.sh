@@ -14,7 +14,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-BOT_COUNT=${BOT_COUNT:-50}
+BOT_COUNT=50
 
 wait_for_paper() {
   local log_file="$1"
