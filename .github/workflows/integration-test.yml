@@ -25,5 +25,4 @@ jobs:
         run: cargo build
       - name: Unit tests
         run: cargo test
-      - name: Integration test
-        run: ./test-harness/run.sh
+

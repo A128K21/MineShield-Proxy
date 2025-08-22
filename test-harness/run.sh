@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Integration test harness for MineShield proxy against PaperMC (pinned jar via wget)
+
 DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$DIR/.."
 SERVER_DIR="$DIR/paper-server"
@@ -12,51 +14,87 @@ cleanup() {
 }
 trap cleanup EXIT
 
-BOT_COUNT=${BOT_COUNT:-50}
+BOT_COUNT=50
+
+wait_for_paper() {
+  local log_file="$1"
+  for _ in {1..240}; do
+    # Accept modern Paper ready line and a fallback
+    if grep -Eq 'Done \([0-9.]+s\)! For help, type "help"|For help, type "help"' "$log_file" 2>/dev/null; then
+      return 0
+    fi
+    sleep 1
+  done
+  echo "Paper server failed to start within timeout" >&2
+  return 1
+}
 
 # Build proxy
-cargo build >/tmp/proxy_build.log
+cargo build >/tmp/proxy_build.log 2>&1
 
-# Install npm dependencies
-npm --prefix "$DIR" install >/tmp/npm_install.log
+# Install npm dependencies for the test harness
+npm --prefix "$DIR" install >/tmp/npm_install.log 2>&1
 
-# Download PaperMC if needed
+# Download pinned Paper jar if needed (your provided URL)
 if [ ! -f "$JAR" ]; then
   mkdir -p "$SERVER_DIR"
-  echo "downloading PaperMC 1.21.1"
-  USER_AGENT="mineshield-test/1.0 (+https://example.com/contact)"
-  API="https://fill.papermc.io/v3/projects/paper/versions/1.21.1/builds"
-  URL=$(curl -fsSL -H "User-Agent: ${USER_AGENT}" "${API}" \
-    | jq -r 'first(.[] | select(.channel=="STABLE") | .downloads."server:default".url) // "null"')
-  if [[ "$URL" == "null" ]]; then
-    echo "No stable build found for 1.21.1." >&2
-    exit 1
-  fi
-  curl -fsSL -H "User-Agent: ${USER_AGENT}" -o "$JAR" "$URL"
+  echo "downloading pinned Paper 1.21.1 jar via wget"
+  wget -O "$JAR" \
+    "https://fill-data.papermc.io/v1/objects/39bd8c00b9e18de91dcabd3cc3dcfa5328685a53b7187a2f63280c22e2d287b9/paper-1.21.1-133.jar"
 fi
 
-# Minimal server configuration with Proxy Protocol enabled
-echo 'eula=true' >"$SERVER_DIR/eula.txt"
+# Minimal, fast server configuration
+cat >"$SERVER_DIR/eula.txt" <<'EOL'
+eula=true
+EOL
+
 cat >"$SERVER_DIR/server.properties" <<'EOL'
 server-port=25581
 online-mode=false
 motd=Test Server
+# speed up CI boot / TPS
+level-type=flat
+generate-structures=false
+difficulty=peaceful
+spawn-monsters=false
+view-distance=2
+simulation-distance=2
+max-players=100
+max-tick-time=-1
+enable-status=true
 EOL
 
+# Enable Proxy Protocol in Paper
 mkdir -p "$SERVER_DIR/config"
 cat >"$SERVER_DIR/config/paper-global.yml" <<'EOL'
 proxies:
-  proxy-protocol:
-    enabled: true
-    require: false
+  bungee-cord:
+    online-mode: true
+  proxy-protocol: true
+  velocity:
+    enabled: false
+    online-mode: true
+    secret: ''
 EOL
 
-# Copy proxy config
+# Copy proxy config for the binary
 cp "$DIR/config.yml" "$ROOT/config.yml"
 
-# Start Paper server
-java -Xms64M -Xmx1024M -jar "$JAR" nogui >/tmp/paper.log &
-sleep 20
+# Boot Paper (single boot)
+RUN_LOG=/tmp/paper.log
+: >"$RUN_LOG"
+(
+  cd "$SERVER_DIR"
+  # Larger heap reduces variance; capture stderr
+  java -Xms256M -Xmx2G -jar ./paper.jar --nogui >"$RUN_LOG" 2>&1
+) &
+
+# Wait for ready state or dump logs
+if ! wait_for_paper "$RUN_LOG"; then
+  echo "Paper did not reach ready state; last 400 lines:" >&2
+  tail -n 400 "$RUN_LOG" >&2 || true
+  exit 1
+fi
 
 # Start proxy
 "$ROOT/target/debug/mineshieldv2-proxy" &
@@ -67,7 +105,7 @@ sleep 2
 echo "running ping test"
 node "$DIR/ping_test.js"
 
-# Run clients
+# Run multi-client test
 echo "running multi-client test with $BOT_COUNT bots"
 BOT_COUNT=$BOT_COUNT node "$DIR/multi_client.js"
 echo "multi-client test completed"

@@ -1,7 +1,7 @@
 const mc = require('minecraft-protocol');
 const HOST = 'localhost';
 const PORT = 25580;
-const VERSION = '1.16.4';
+const VERSION = '1.21.1';
 
 let errors = 0;
 
