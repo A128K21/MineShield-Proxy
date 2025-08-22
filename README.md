@@ -15,14 +15,17 @@
 - **Target Overload Prevention:**  
   Prevents a single target server from being overwhelmed by rate limiting connections per second.
 
-- **Configurable Thread Pool:**  
-  Customize the number of threads used by the proxy (default is 4) for optimal performance.
+- **Configurable Thread Pool:**
+  Customize the number of threads used by the proxy (default is 4) for both listener and forwarding pools.
 
-- **Proxy Protocol v2:**  
+- **Proxy Protocol v2:**
   Ensures that your backend servers receive accurate client IP information.
 
-- **MOTD Cacheing**  
+- **MOTD Cacheing**
   The proxy pings the target servers in every second and keeps it's cache up to date.
+
+- **Persistent IP state:**
+  Blocked and trusted IP information is stored in a SQLite database so bans survive restarts.
 
 
 ## Flowchart
@@ -62,7 +65,7 @@
     # Where should the proxy listen for connections?
     bind-address: "127.0.0.1:25565"
     
-    # Number of threads to use for the proxy (only used at startup)
+    # Number of threads for listener and forwarding pools (only used at startup)
     proxy_threads: 4
    
     # ntfy integration "ntfy.sh" "xy-topic" leave blank if disabled.

@@ -1,27 +1,29 @@
-use std::collections::HashMap;
-use std::net::{ToSocketAddrs, Ipv4Addr, SocketAddr};
-use std::sync::Mutex;
-use std::fs::File;
-use std::io::{Read, Write};
-use std::time::{SystemTime, UNIX_EPOCH};
+use dashmap::DashMap;
 use lazy_static::lazy_static;
 use log::error;
 use serde::Deserialize;
+use std::collections::HashMap;
+use std::fs::File;
+use std::io::{Read, Write};
+use std::net::{Ipv4Addr, SocketAddr, ToSocketAddrs};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 
 // ---------- Global locks and references ----------
 
 lazy_static! {
     /// For each domain, we store its RedirectionConfig
-    pub static ref REDIRECTION_MAP: Mutex<HashMap<String, RedirectionConfig>> = Mutex::new(HashMap::new());
+    pub static ref REDIRECTION_MAP: DashMap<String, RedirectionConfig> = DashMap::new();
     /// Number of threads to be used by the proxy (set at startup)
     pub static ref PROXY_THREADS: Mutex<usize> = Mutex::new(4);
     /// Bind address for the proxy (loaded from config)
     pub static ref BIND_ADDRESS: Mutex<SocketAddr> = Mutex::new("0.0.0.0:25565".parse().unwrap());
     /// ntfy URL composed from ntfy_server and ntfy_topic in the config.
     pub static ref NTFY_URL: Mutex<String> = Mutex::new(String::new());
-    /// Debug flag read from the config.
-    pub static ref DEBUG: Mutex<bool> = Mutex::new(false);
 }
+
+/// Debug flag read from the config.
+pub static DEBUG: AtomicBool = AtomicBool::new(false);
 
 // ---------- Data structures ----------
 
@@ -119,8 +121,7 @@ pub fn update_proxies_from_config(config_path: &str) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             error!("Config file not found. Creating a default config file...");
             contents = default_config();
-            let mut file =
-                File::create(config_path).expect("Unable to create default config file");
+            let mut file = File::create(config_path).expect("Unable to create default config file");
             file.write_all(contents.as_bytes())
                 .expect("Unable to write default config file");
         }
@@ -129,8 +130,7 @@ pub fn update_proxies_from_config(config_path: &str) {
         }
     }
 
-    let config: Config =
-        serde_yaml::from_str(&contents).expect("Failed to parse YAML config");
+    let config: Config = serde_yaml::from_str(&contents).expect("Failed to parse YAML config");
 
     // 1) Update the bind address
     {
@@ -158,10 +158,7 @@ pub fn update_proxies_from_config(config_path: &str) {
     }
 
     // 4) Update debug flag
-    {
-        let mut debug_flag = DEBUG.lock().unwrap();
-        *debug_flag = config.debug;
-    }
+    DEBUG.store(config.debug, Ordering::Relaxed);
 
     // 5) Parse and store redirections in a map
     let mut new_map = HashMap::new();
@@ -175,16 +172,16 @@ pub fn update_proxies_from_config(config_path: &str) {
                     max_packet_per_second: rd.max_packet_per_second,
                     max_ping_response_per_second: rd.max_ping_response_per_second,
                 };
-                new_map.insert(rd.incoming_domain, rcfg);
+                new_map.insert(rd.incoming_domain.to_ascii_lowercase(), rcfg);
             }
             Err(e) => {
                 error!("Error parsing target '{}': {}", rd.target, e);
             }
         }
     }
-    {
-        let mut map = REDIRECTION_MAP.lock().unwrap();
-        *map = new_map;
+    REDIRECTION_MAP.clear();
+    for (k, v) in new_map {
+        REDIRECTION_MAP.insert(k, v);
     }
 }
 
@@ -195,8 +192,7 @@ pub fn update_proxies() {
 
 /// Resolves a given domain to an `(ip, port)`, plus all other config data.
 pub fn resolve(domain: &str) -> Option<RedirectionConfig> {
-    let map = REDIRECTION_MAP.lock().unwrap();
-    map.get(domain).cloned()
+    REDIRECTION_MAP.get(domain).map(|v| v.clone())
 }
 
 // A default config, just in case the file doesn't exist.
@@ -205,7 +201,7 @@ fn default_config() -> String {
 # Where should the proxy listen for connections?
 bind-address: "127.0.0.1:25565"
 
-# Number of threads to use for the proxy (only used at startup)
+# Number of threads for listener and forwarding pools (only used at startup)
 proxy_threads: 4
 
 # ntfy integration "ntfy.sh" "xy-topic" leave blank if disabled.
@@ -235,5 +231,6 @@ redirections:
     # Maximum connections per second from a single source. 0 = unlimited
     max_connections_per_second: 5
 
-"#.to_string()
+"#
+    .to_string()
 }
