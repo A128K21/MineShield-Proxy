@@ -65,8 +65,12 @@ lazy_static! {
     static ref ACTIVE_CONNECTIONS: DashMap<SocketAddr, Instant> = DashMap::new();
     // IPs considered trusted (having at least one 2+ minute connection) with last-seen time
     static ref TRUSTED_IPS: DashMap<IpAddr, Instant> = DashMap::new();
-    // A dedicated thread pool for bidirectional forwarding (size adjustable)
-    static ref FORWARDING_POOL: rayon::ThreadPool = ThreadPoolBuilder::new().num_threads(50).build().unwrap();
+    // A dedicated thread pool for bidirectional forwarding
+    // Uses the same thread count as the listener pool (default 4)
+    static ref FORWARDING_POOL: rayon::ThreadPool = ThreadPoolBuilder::new()
+        .num_threads(*PROXY_THREADS.lock().unwrap())
+        .build()
+        .unwrap();
 }
 
 const TRUSTED_IP_IDLE_SECS: u64 = 600;

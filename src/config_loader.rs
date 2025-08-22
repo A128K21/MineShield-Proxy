@@ -201,7 +201,7 @@ fn default_config() -> String {
 # Where should the proxy listen for connections?
 bind-address: "127.0.0.1:25565"
 
-# Number of threads to use for the proxy (only used at startup)
+# Number of threads for listener and forwarding pools (only used at startup)
 proxy_threads: 4
 
 # ntfy integration "ntfy.sh" "xy-topic" leave blank if disabled.
