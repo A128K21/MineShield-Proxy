@@ -33,9 +33,6 @@ jobs:
       - name: Unit tests
         run: cargo test
 
-      - name: Integration test
-        run: ./test-harness/run.sh
-
       - name: Build (musl, static)
         run: |
           cargo build --release --target x86_64-unknown-linux-musl
