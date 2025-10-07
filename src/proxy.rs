@@ -8,9 +8,9 @@ use proxy_protocol::{
     version2::{ProxyAddresses, ProxyCommand, ProxyTransportProtocol},
     ProxyHeader,
 };
+use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use rusqlite::{params, Connection};
 use std::io::{self, Cursor, Read};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::Ordering;
@@ -23,7 +23,7 @@ use tokio::time::timeout;
 use dashmap::DashMap;
 
 use crate::config_loader::{resolve, RedirectionConfig, BIND_ADDRESS, DEBUG};
-use crate::{forwarding, send_ntfy_notification, target_pinger};
+use crate::{forwarding, metrics, target_pinger};
 use std::sync::Arc;
 
 // ===========================================
@@ -86,8 +86,8 @@ const CONNECT_TIMEOUT_SECS: u64 = 5;
 const IP_STATUS_DB: &str = "ip_status.sqlite";
 
 fn save_ip_status() -> io::Result<()> {
-    let mut conn = Connection::open(IP_STATUS_DB)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    let mut conn =
+        Connection::open(IP_STATUS_DB).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
     conn.execute(
         "CREATE TABLE IF NOT EXISTS ip_status (ip TEXT PRIMARY KEY, status INTEGER NOT NULL, expiry INTEGER)",
         [],
@@ -140,7 +140,11 @@ fn load_ip_status() -> usize {
         }
     };
     let rows = match stmt.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, Option<i64>>(2)?))
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, Option<i64>>(2)?,
+        ))
     }) {
         Ok(r) => r,
         Err(e) => {
@@ -291,6 +295,7 @@ async fn handle_client(mut client_stream: TcpStream) {
     };
     let src_ip = src_addr.ip();
     if is_ip_blocked(&src_ip) {
+        metrics::record_block("ip_blacklist");
         let _ = client_stream.shutdown().await;
         return;
     }
@@ -320,7 +325,8 @@ async fn handle_client(mut client_stream: TcpStream) {
                 src_ip, e
             );
             log_error!("{}", err_msg);
-            send_ntfy_notification(&err_msg);
+            metrics::record_handshake_failure("decode");
+            metrics::record_block("handshake_decode");
             block_ip(src_ip);
             let _ = client_stream.shutdown().await;
             return;
@@ -329,6 +335,7 @@ async fn handle_client(mut client_stream: TcpStream) {
 
     match next_state {
         1 => {
+            metrics::record_ping_request();
             if let Some(cfg) = resolve(&server_address) {
                 if !check_ping_limit(&server_address, src_ip, &cfg) {
                     let err_msg = format!(
@@ -336,7 +343,7 @@ async fn handle_client(mut client_stream: TcpStream) {
                         server_address, src_ip
                     );
                     log_error!("{}", err_msg);
-                    send_ntfy_notification(&err_msg);
+                    metrics::record_block("ping_rate");
                     block_ip(src_ip);
                     let _ = client_stream.shutdown().await;
                     return;
@@ -356,22 +363,32 @@ async fn handle_client(mut client_stream: TcpStream) {
             }
         }
         2 => {
+            metrics::record_connection_attempt();
             if let Some(redirection_cfg) = resolve(&server_address) {
                 let redirection_cfg = Arc::new(redirection_cfg);
                 if check_connection_limit(&server_address, src_ip, &redirection_cfg) {
                     let proxy_to = SocketAddr::new(redirection_cfg.ip.into(), redirection_cfg.port);
-                    match timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS), TcpStream::connect(proxy_to)).await {
+                    match timeout(
+                        Duration::from_secs(CONNECT_TIMEOUT_SECS),
+                        TcpStream::connect(proxy_to),
+                    )
+                    .await
+                    {
                         Ok(Ok(mut target_stream)) => {
                             if let Err(e) = target_stream.set_nodelay(true) {
                                 log_error!("Failed to disable Nagle on target: {}", e);
                             }
-                            if let (Ok(src_addr), Ok(dst_addr)) = (client_stream.peer_addr(), target_stream.peer_addr()) {
-                                let new_buf = encapsulate_with_proxy_protocol(src_addr, dst_addr, &buf);
+                            if let (Ok(src_addr), Ok(dst_addr)) =
+                                (client_stream.peer_addr(), target_stream.peer_addr())
+                            {
+                                let new_buf =
+                                    encapsulate_with_proxy_protocol(src_addr, dst_addr, &buf);
                                 send_initial_buffer_to_target(&new_buf, &mut target_stream).await;
                             }
                             let (client_read, client_write) = client_stream.into_split();
                             let (target_read, target_write) = target_stream.into_split();
                             ACTIVE_CONNECTIONS.insert(src_addr, Instant::now());
+                            metrics::record_connection_established();
                             let domain_clone = server_address.clone();
                             let cfg_clone1 = redirection_cfg.clone();
                             let cfg_clone2 = redirection_cfg.clone();
@@ -408,10 +425,15 @@ async fn handle_client(mut client_stream: TcpStream) {
                                 server_address,
                                 e
                             );
+                            metrics::record_connection_failure("target_error");
                             let _ = client_stream.shutdown().await;
                         }
                         Err(_) => {
-                            log_error!("Timeout connecting to target server for {}", server_address);
+                            log_error!(
+                                "Timeout connecting to target server for {}",
+                                server_address
+                            );
+                            metrics::record_connection_failure("target_timeout");
                             let _ = client_stream.shutdown().await;
                         }
                     }
@@ -421,7 +443,8 @@ async fn handle_client(mut client_stream: TcpStream) {
                         server_address, src_ip
                     );
                     log_error!("{}", err_msg);
-                    send_ntfy_notification(&err_msg);
+                    metrics::record_block("connection_rate");
+                    metrics::record_connection_failure("rate_limited");
                     block_ip(src_ip);
                     let _ = client_stream.shutdown().await;
                     return;
@@ -431,6 +454,7 @@ async fn handle_client(mut client_stream: TcpStream) {
                     "No redirection configuration for domain {}, sending fallback response",
                     server_address
                 );
+                metrics::record_connection_failure("unknown_domain");
                 if let Err(e) = send_fallback_status_response(&mut client_stream).await {
                     log_error!("Error sending fallback response: {}", e);
                 }
@@ -443,6 +467,7 @@ async fn handle_client(mut client_stream: TcpStream) {
                 src_ip,
                 server_address
             );
+            metrics::record_handshake_failure("invalid_state");
             let _ = client_stream.shutdown().await;
         }
     }
@@ -603,7 +628,9 @@ fn check_connection_limit(domain: &str, src_ip: IpAddr, cfg: &RedirectionConfig)
 }
 
 pub(crate) fn finish_connection(addr: SocketAddr) {
-    ACTIVE_CONNECTIONS.remove(&addr);
+    if ACTIVE_CONNECTIONS.remove(&addr).is_some() {
+        metrics::record_connection_closed();
+    }
 }
 
 // ===========================================
@@ -641,6 +668,7 @@ pub(crate) fn block_ip(ip: IpAddr) {
             expiry: Some(expiry),
         },
     );
+    metrics::record_ip_block();
 }
 
 fn record_ping(ip: IpAddr) {

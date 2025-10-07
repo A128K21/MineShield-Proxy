@@ -23,6 +23,39 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y jq
       - name: Build
         run: cargo build
+      - name: Prometheus exporter smoke test
+        run: |
+          set -euo pipefail
+          cat <<'EOF' > config.yml
+          bind-address: "127.0.0.1:25599"
+          proxy_threads: 1
+          prometheus:
+            enabled: true
+            listen-address: "127.0.0.1:19100"
+          debug: false
+          redirections:
+            - incoming_domain: "localhost"
+              target: "127.0.0.1:25565"
+          EOF
+
+          ./target/debug/mineshieldv2-proxy &
+          PROXY_PID=$!
+          trap 'kill $PROXY_PID || true; rm -f config.yml' EXIT
+
+          for _ in {1..40}; do
+            if curl -fsS http://127.0.0.1:19100/healthz >/dev/null 2>&1; then
+              ready=1
+              break
+            fi
+            sleep 0.25
+          done
+
+          if [ "${ready:-0}" != "1" ]; then
+            echo "Prometheus exporter did not respond on time" >&2
+            exit 1
+          fi
+
+          curl -fsS http://127.0.0.1:19100/metrics | grep -q 'mineshield_proxy_connection_attempts_total'
       - name: Unit tests
         run: cargo test
 

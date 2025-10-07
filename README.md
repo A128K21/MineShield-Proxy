@@ -27,14 +27,13 @@
 - **Persistent IP state:**
   Blocked and trusted IP information is stored in a SQLite database.
 
+- **Prometheus metrics exporter:**
+  Expose proxy health, blocking actions, and traffic counters for ingestion by any Prometheus-compatible monitoring stack.
+
 
 ## Flowchart
 ![FlowChart](https://i.ibb.co/Z6PW1ZNy/Untitled-diagram-2025-03-09-100419.png)
 ---
-## Example ntfy.sh
-<img src="https://i.ibb.co/zTBF6Wz9/Screenshot-20250325-190525-ntfy.jpg" width="300">
-
-### Ntfy.sh notifications are limited to maximum 1 per second. (to prevent api overload)
 
 
 ## Getting Started
@@ -68,9 +67,11 @@
     # Number of threads for listener and forwarding pools (only used at startup)
     proxy_threads: 4
    
-    # ntfy integration "ntfy.sh" "xy-topic" leave blank if disabled.
-    ntfy_server: ""
-    ntfy_topic: ""
+    # Prometheus metrics exporter configuration.
+    prometheus:
+      enabled: false
+      # When enabled, bind the exporter on this address.
+      listen-address: "0.0.0.0:9100"
     
     # Debug messages for proxy development
     debug: false
@@ -86,17 +87,26 @@
       # Maximum connections per second from a single source. 0 = unlimited
       max_connections_per_second: 0
     
-    - incoming_domain: "example.com"
-      target: "target.local:25678"
-      # Max packets/second before kicking. 0 = none
-      max_packet_per_second: 100
-      # Max ping responses/second from cache
-      max_ping_response_per_second: 100
-      # Maximum connections per second from a single source. 0 = unlimited
-      max_connections_per_second: 5
-       
-          
-    ```
+      - incoming_domain: "example.com"
+        target: "target.local:25678"
+        # Max packets/second before kicking. 0 = none
+        max_packet_per_second: 100
+        # Max ping responses/second from cache
+        max_ping_response_per_second: 100
+        # Maximum connections per second from a single source. 0 = unlimited
+        max_connections_per_second: 5
+
+
+   ```
+
+### Prometheus metrics
+
+Enable the Prometheus exporter by setting `prometheus.enabled: true` and assigning a listen address (for example `0.0.0.0:9100`). The exporter serves:
+
+- `GET /metrics` — Prometheus text exposition format containing counters for blocks, connections, traffic, and ping activity.
+- `GET /healthz` — Simple health probe endpoint returning `ok` when the exporter is running.
+
+Set `prometheus.enabled: false` (the default) to avoid running the exporter. The legacy top-level `metrics_address` key is still accepted for backwards compatibility but will be removed in a future release.
 
 
 

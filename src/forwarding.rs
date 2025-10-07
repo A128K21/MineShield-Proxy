@@ -2,7 +2,7 @@
 // Imports
 // ===========================================
 use crate::config_loader::RedirectionConfig;
-use crate::send_ntfy_notification;
+use crate::metrics;
 use dashmap::DashMap;
 use lazy_static::lazy_static;
 use log::error;
@@ -63,12 +63,17 @@ pub(crate) async fn forward_loop<R, W>(
     src_addr: SocketAddr,
     client_to_server: bool,
     tag: &'static str,
-)
-where
+) where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
 {
     let mut buf = [0u8; 2048];
+    let direction_label = if client_to_server {
+        "client_to_server"
+    } else {
+        "server_to_client"
+    };
+
     loop {
         match from.read(&mut buf).await {
             Ok(n) if n > 0 => {
@@ -80,13 +85,15 @@ where
                         );
                         error!("{}", err_msg);
                         crate::proxy::block_ip(src_ip);
-                        send_ntfy_notification(&err_msg);
+                        metrics::record_block("packet_rate");
                         break;
                     }
                 }
                 if let Err(e) = to.write_all(&buf[..n]).await {
                     error!("{} - write error: {}", tag, e);
                     break;
+                } else {
+                    metrics::record_bytes(direction_label, n);
                 }
             }
             Ok(_) => break, // EOF

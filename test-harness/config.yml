@@ -1,7 +1,8 @@
 bind-address: 127.0.0.1:25580
-proxy-threads: 4
-ntfy_server: ''
-ntfy_topic: ''
+proxy_threads: 4
+prometheus:
+  enabled: false
+  listen-address: 127.0.0.1:19100
 debug: true
 redirections:
   - incoming_domain: localhost

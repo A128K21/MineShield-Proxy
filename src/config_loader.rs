@@ -1,6 +1,6 @@
 use dashmap::DashMap;
 use lazy_static::lazy_static;
-use log::error;
+use log::{error, warn};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::fs::File;
@@ -18,14 +18,24 @@ lazy_static! {
     pub static ref PROXY_THREADS: Mutex<usize> = Mutex::new(4);
     /// Bind address for the proxy (loaded from config)
     pub static ref BIND_ADDRESS: Mutex<SocketAddr> = Mutex::new("0.0.0.0:25565".parse().unwrap());
-    /// ntfy URL composed from ntfy_server and ntfy_topic in the config.
-    pub static ref NTFY_URL: Mutex<String> = Mutex::new(String::new());
+    /// Optional bind address for the Prometheus metrics exporter.
+    pub static ref METRICS_ADDRESS: Mutex<Option<SocketAddr>> = Mutex::new(None);
 }
 
 /// Debug flag read from the config.
 pub static DEBUG: AtomicBool = AtomicBool::new(false);
 
 // ---------- Data structures ----------
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
+pub struct PrometheusConfig {
+    /// Whether the Prometheus exporter should run.
+    pub enabled: bool,
+    /// Optional listen address for the Prometheus exporter.
+    #[serde(rename = "listen-address")]
+    pub listen_address: Option<String>,
+}
 
 #[derive(Debug, Deserialize)]
 pub struct Config {
@@ -35,8 +45,12 @@ pub struct Config {
     /// Number of threads to use for the proxy. (Only read at startup.)
     #[serde(default = "default_proxy_threads")]
     pub proxy_threads: usize,
-    pub ntfy_server: String,
-    pub ntfy_topic: String,
+    /// Prometheus exporter configuration block.
+    #[serde(default)]
+    pub prometheus: PrometheusConfig,
+    /// Legacy flat metrics address option kept for backwards compatibility.
+    #[serde(default, rename = "metrics_address")]
+    pub legacy_metrics_address: Option<String>,
     /// Debug flag.
     #[serde(default)]
     pub debug: bool,
@@ -147,14 +161,61 @@ pub fn update_proxies_from_config(config_path: &str) {
         *threads = config.proxy_threads;
     }
 
-    // 3) Update ntfy URL from ntfy_server and ntfy_topic.
+    // 3) Update metrics bind address
     {
-        let mut ntfy_url = NTFY_URL.lock().unwrap();
-        if config.ntfy_server.trim().is_empty() || config.ntfy_topic.trim().is_empty() {
-            *ntfy_url = String::new();
-        } else {
-            *ntfy_url = format!("{}/{}", config.ntfy_server.trim(), config.ntfy_topic.trim());
+        let mut metrics_addr = METRICS_ADDRESS.lock().unwrap();
+
+        let mut resolved_addr: Option<SocketAddr> = None;
+
+        if config.prometheus.enabled {
+            match config
+                .prometheus
+                .listen_address
+                .as_ref()
+                .map(|addr| addr.trim())
+                .filter(|addr| !addr.is_empty())
+            {
+                Some(addr_str) => match addr_str.parse::<SocketAddr>() {
+                    Ok(addr) => {
+                        resolved_addr = Some(addr);
+                    }
+                    Err(e) => {
+                        error!(
+                            "Invalid prometheus.listen-address '{}' when enabling exporter: {}",
+                            addr_str, e
+                        );
+                    }
+                },
+                None => {
+                    error!(
+                        "Prometheus exporter enabled but no listen-address provided; disabling exporter."
+                    );
+                }
+            }
         }
+
+        if resolved_addr.is_none() {
+            if let Some(addr_str) = config
+                .legacy_metrics_address
+                .as_ref()
+                .map(|addr| addr.trim())
+                .filter(|addr| !addr.is_empty())
+            {
+                match addr_str.parse::<SocketAddr>() {
+                    Ok(addr) => {
+                        warn!(
+                            "Using deprecated 'metrics_address' root field; please migrate to 'prometheus.listen-address'."
+                        );
+                        resolved_addr = Some(addr);
+                    }
+                    Err(e) => {
+                        error!("Invalid metrics_address '{}': {}", addr_str, e);
+                    }
+                }
+            }
+        }
+
+        *metrics_addr = resolved_addr;
     }
 
     // 4) Update debug flag
@@ -204,9 +265,11 @@ bind-address: "127.0.0.1:25565"
 # Number of threads for listener and forwarding pools (only used at startup)
 proxy_threads: 4
 
-# ntfy integration "ntfy.sh" "xy-topic" leave blank if disabled.
-ntfy_server: ""
-ntfy_topic: ""
+# Prometheus metrics exporter configuration.
+prometheus:
+  enabled: false
+  # Set to the listen address for the exporter when enabled.
+  listen-address: "0.0.0.0:9100"
 
 # Debug messages for proxy development
 debug: false
