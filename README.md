@@ -31,12 +31,6 @@
 ## Flowchart
 ![FlowChart](https://i.ibb.co/Z6PW1ZNy/Untitled-diagram-2025-03-09-100419.png)
 ---
-## Example ntfy.sh
-<img src="https://i.ibb.co/zTBF6Wz9/Screenshot-20250325-190525-ntfy.jpg" width="300">
-
-### Ntfy.sh notifications are limited to maximum 1 per second. (to prevent api overload)
-
-
 ## Getting Started
 
 ### Bare Metal Installation
@@ -64,14 +58,15 @@
     # Default configuration for proxy redirections.
     # Where should the proxy listen for connections?
     bind-address: "127.0.0.1:25565"
-    
+
     # Number of threads for listener and forwarding pools (only used at startup)
     proxy_threads: 4
-   
-    # ntfy integration "ntfy.sh" "xy-topic" leave blank if disabled.
-    ntfy_server: ""
-    ntfy_topic: ""
-    
+
+    # Prometheus exporter configuration
+    prometheus_exporter:
+      enabled: false
+      bind-address: "0.0.0.0:9100"
+
     # Debug messages for proxy development
     debug: false
 
