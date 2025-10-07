@@ -82,7 +82,7 @@
       target: "127.0.0.1:25577"
       # Max packets/second before kicking. 0 = none
       max_packet_per_second: 0
-      # Max ping responses/second from cache
+      # Max ping responses/second from cache (0 disables status caching)
       max_ping_response_per_second: 0
       # Maximum connections per second from a single source. 0 = unlimited
       max_connections_per_second: 0
@@ -91,7 +91,7 @@
         target: "target.local:25678"
         # Max packets/second before kicking. 0 = none
         max_packet_per_second: 100
-        # Max ping responses/second from cache
+        # Max ping responses/second from cache (0 disables status caching)
         max_ping_response_per_second: 100
         # Maximum connections per second from a single source. 0 = unlimited
         max_connections_per_second: 5
