@@ -20,6 +20,12 @@ lazy_static! {
     pub static ref BIND_ADDRESS: Mutex<SocketAddr> = Mutex::new("0.0.0.0:25565".parse().unwrap());
     /// ntfy URL composed from ntfy_server and ntfy_topic in the config.
     pub static ref NTFY_URL: Mutex<String> = Mutex::new(String::new());
+    /// Whether the Prometheus exporter should be enabled.
+    pub static ref PROMETHEUS_EXPORTER_ENABLED: AtomicBool = AtomicBool::new(false);
+    /// Address the Prometheus exporter should bind to.
+    pub static ref PROMETHEUS_EXPORTER_BIND_ADDRESS: Mutex<SocketAddr> = Mutex::new(
+        "0.0.0.0:9100".parse().unwrap()
+    );
 }
 
 /// Debug flag read from the config.
@@ -35,8 +41,12 @@ pub struct Config {
     /// Number of threads to use for the proxy. (Only read at startup.)
     #[serde(default = "default_proxy_threads")]
     pub proxy_threads: usize,
+    #[serde(default)]
     pub ntfy_server: String,
+    #[serde(default)]
     pub ntfy_topic: String,
+    #[serde(default)]
+    pub prometheus_exporter: PrometheusExporterConfig,
     /// Debug flag.
     #[serde(default)]
     pub debug: bool,
@@ -68,6 +78,24 @@ pub struct RedirectionConfig {
     pub max_connections_per_second: usize,
     pub max_packet_per_second: usize,
     pub max_ping_response_per_second: usize,
+}
+
+/// Configuration for the Prometheus exporter endpoint.
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct PrometheusExporterConfig {
+    pub enabled: bool,
+    #[serde(rename = "bind-address")]
+    pub bind_address: String,
+}
+
+impl Default for PrometheusExporterConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bind_address: "0.0.0.0:9100".to_string(),
+        }
+    }
 }
 
 // ---------- Defaults ----------
@@ -157,10 +185,21 @@ pub fn update_proxies_from_config(config_path: &str) {
         }
     }
 
-    // 4) Update debug flag
+    // 4) Update Prometheus exporter configuration
+    PROMETHEUS_EXPORTER_ENABLED.store(config.prometheus_exporter.enabled, Ordering::Relaxed);
+    {
+        let mut exporter_bind = PROMETHEUS_EXPORTER_BIND_ADDRESS.lock().unwrap();
+        *exporter_bind = config
+            .prometheus_exporter
+            .bind_address
+            .parse()
+            .expect("Invalid Prometheus exporter bind address in config");
+    }
+
+    // 5) Update debug flag
     DEBUG.store(config.debug, Ordering::Relaxed);
 
-    // 5) Parse and store redirections in a map
+    // 6) Parse and store redirections in a map
     let mut new_map = HashMap::new();
     for rd in config.redirections {
         match parse_target(&rd.target) {
@@ -204,9 +243,10 @@ bind-address: "127.0.0.1:25565"
 # Number of threads for listener and forwarding pools (only used at startup)
 proxy_threads: 4
 
-# ntfy integration "ntfy.sh" "xy-topic" leave blank if disabled.
-ntfy_server: ""
-ntfy_topic: ""
+# Prometheus exporter configuration
+prometheus_exporter:
+  enabled: false
+  bind-address: "0.0.0.0:9100"
 
 # Debug messages for proxy development
 debug: false

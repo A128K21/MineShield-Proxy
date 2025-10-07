@@ -1,7 +1,8 @@
 bind-address: 127.0.0.1:25580
 proxy-threads: 4
-ntfy_server: ''
-ntfy_topic: ''
+prometheus_exporter:
+  enabled: false
+  bind-address: 127.0.0.1:9200
 debug: true
 redirections:
   - incoming_domain: localhost
