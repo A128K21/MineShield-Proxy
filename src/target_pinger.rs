@@ -222,6 +222,12 @@ pub fn background_pinger() {
                 .collect();
 
         for (domain, redirection_cfg) in redirection_map {
+            if redirection_cfg.max_ping_response_per_second == 0 {
+                // Status caching is disabled for this domain, so ensure we don't keep
+                // stale data around and skip pinging the backend entirely.
+                STATUS_CACHE.remove(&domain);
+                continue;
+            }
             // Retrieve target IP and port from the configuration.
             let ip = redirection_cfg.ip;
             let port = redirection_cfg.port;
