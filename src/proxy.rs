@@ -472,15 +472,30 @@ async fn handle_client(mut client_stream: TcpStream) {
                             if let Err(e) = target_stream.set_nodelay(true) {
                                 log_error!("Failed to disable Nagle on target: {}", e);
                             }
-                            if let (Ok(src_addr), Ok(dst_addr)) =
-                                (client_stream.peer_addr(), target_stream.peer_addr())
-                            {
-                                let new_buf = encapsulate_with_proxy_protocol(
-                                    src_addr,
-                                    dst_addr,
-                                    &initial_buffer,
-                                );
-                                send_initial_buffer_to_target(&new_buf, &mut target_stream).await;
+                            if redirection_cfg.send_proxy_protocol {
+                                match (client_stream.peer_addr(), target_stream.peer_addr()) {
+                                    (Ok(src_addr), Ok(dst_addr)) => {
+                                        let new_buf = encapsulate_with_proxy_protocol(
+                                            src_addr,
+                                            dst_addr,
+                                            &initial_buffer,
+                                        );
+                                        send_initial_buffer_to_target(&new_buf, &mut target_stream)
+                                            .await;
+                                    }
+                                    (Err(err), _) | (_, Err(err)) => {
+                                        log_error!(
+                                            "Failed to obtain socket addresses for proxy protocol header: {}",
+                                            err
+                                        );
+                                        let _ = client_stream.shutdown().await;
+                                        let _ = target_stream.shutdown().await;
+                                        return;
+                                    }
+                                }
+                            } else {
+                                send_initial_buffer_to_target(&initial_buffer, &mut target_stream)
+                                    .await;
                             }
                             let (client_read, client_write) = client_stream.into_split();
                             let (target_read, target_write) = target_stream.into_split();

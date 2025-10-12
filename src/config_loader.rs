@@ -100,6 +100,9 @@ pub struct Redirection {
     /// Max ping responses/second from cache.
     #[serde(default)]
     pub max_ping_response_per_second: usize,
+    /// Whether to send a Proxy Protocol v2 header before the handshake.
+    #[serde(default = "default_send_proxy_protocol")]
+    pub send_proxy_protocol: bool,
 }
 
 /// This is what we'll store per domain internally
@@ -110,6 +113,7 @@ pub struct RedirectionConfig {
     pub max_connections_per_second: usize,
     pub max_packet_per_second: usize,
     pub max_ping_response_per_second: usize,
+    pub send_proxy_protocol: bool,
 }
 
 /// Configuration for the Prometheus exporter endpoint.
@@ -142,6 +146,10 @@ fn default_limbo_timeout_ms() -> u64 {
 
 fn default_limbo_hold_ms() -> u64 {
     5000
+}
+
+fn default_send_proxy_protocol() -> bool {
+    true
 }
 
 // ---------- Helpers to load config ----------
@@ -246,6 +254,7 @@ pub fn update_proxies_from_config(config_path: &str) {
                     max_connections_per_second: rd.max_connections_per_second,
                     max_packet_per_second: rd.max_packet_per_second,
                     max_ping_response_per_second: rd.max_ping_response_per_second,
+                    send_proxy_protocol: rd.send_proxy_protocol,
                 };
                 new_map.insert(rd.incoming_domain.to_ascii_lowercase(), rcfg);
             }
@@ -303,6 +312,8 @@ redirections:
     max_ping_response_per_second: 0
     # Maximum connections per second from a single source. 0 = unlimited
     max_connections_per_second: 0
+    # Whether to send a Proxy Protocol v2 header to the target
+    send_proxy_protocol: true
 
   - incoming_domain: "example.com"
     target: "target.local:25678"
@@ -312,6 +323,8 @@ redirections:
     max_ping_response_per_second: 100
     # Maximum connections per second from a single source. 0 = unlimited
     max_connections_per_second: 5
+    # Whether to send a Proxy Protocol v2 header to the target
+    send_proxy_protocol: true
 
 "#
     .to_string()
