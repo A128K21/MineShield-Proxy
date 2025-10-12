@@ -163,12 +163,14 @@ pub fn read_status_response(stream: &mut TcpStream) -> io::Result<String> {
 // Section 5: Ping Target Functionality
 // ===========================================
 
-/// Pings the target server using a Proxy Protocol v2 header and returns the status JSON.
+/// Pings the target server and returns the status JSON. Optionally sends a Proxy Protocol
+/// header if the backend expects it.
 pub fn ping_target(
     server_address: &str,
     host: &str,
     port: u16,
     protocol_version: u32,
+    send_proxy_protocol: bool,
 ) -> io::Result<String> {
     let mut addrs = (host, port)
         .to_socket_addrs()
@@ -186,11 +188,12 @@ pub fn ping_target(
     stream.set_nodelay(true)?;
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
 
-    // Send Proxy Protocol header
-    let local_addr = stream.local_addr()?;
-    let proxy_header = build_proxy_protocol_header(local_addr, target_addr);
-    stream.write_all(&proxy_header)?;
-    stream.flush()?;
+    if send_proxy_protocol {
+        let local_addr = stream.local_addr()?;
+        let proxy_header = build_proxy_protocol_header(local_addr, target_addr);
+        stream.write_all(&proxy_header)?;
+        stream.flush()?;
+    }
 
     // Start measuring latency
     let start = Instant::now();
@@ -239,7 +242,13 @@ pub fn background_pinger() {
             // Use protocol version 754 (e.g., for Minecraft 1.16.4+)
             let protocol_version = 754;
 
-            match ping_target(&domain, &host, port, protocol_version) {
+            match ping_target(
+                &domain,
+                &host,
+                port,
+                protocol_version,
+                redirection_cfg.send_proxy_protocol,
+            ) {
                 Ok(status_json) => {
                     info!("Ping successful for '{}'", domain);
                     // Update the JSON status in the cache.
