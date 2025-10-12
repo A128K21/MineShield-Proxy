@@ -18,3 +18,5 @@ serde_yaml = "0.9.34"
 serde_json = "1.0.140"
 dashmap = "6.1.0"
 rusqlite = { version = "0.31", features = ["bundled"] }
+net = { git = "https://github.com/Quozul/PicoLimbo", package = "net" }
+minecraft_protocol = { git = "https://github.com/Quozul/PicoLimbo", package = "minecraft_protocol" }

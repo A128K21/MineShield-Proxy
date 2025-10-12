@@ -8,9 +8,9 @@ use proxy_protocol::{
     version2::{ProxyAddresses, ProxyCommand, ProxyTransportProtocol},
     ProxyHeader,
 };
+use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use rusqlite::{params, Connection};
 use std::io::{self, Cursor, Read};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::Ordering;
@@ -22,7 +22,11 @@ use tokio::time::timeout;
 // Additional dependency for concurrent maps
 use dashmap::DashMap;
 
-use crate::config_loader::{resolve, RedirectionConfig, BIND_ADDRESS, DEBUG};
+use crate::config_loader::{
+    resolve, RedirectionConfig, BIND_ADDRESS, DEBUG, LIMBO_ENABLED, LIMBO_HOLD_DURATION_MS,
+    LIMBO_VERIFICATION_TIMEOUT_MS,
+};
+use crate::limbo::{self, HandshakeCapture};
 use crate::{forwarding, send_ntfy_notification, target_pinger};
 use std::sync::Arc;
 
@@ -86,8 +90,8 @@ const CONNECT_TIMEOUT_SECS: u64 = 5;
 const IP_STATUS_DB: &str = "ip_status.sqlite";
 
 fn save_ip_status() -> io::Result<()> {
-    let mut conn = Connection::open(IP_STATUS_DB)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    let mut conn =
+        Connection::open(IP_STATUS_DB).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
     conn.execute(
         "CREATE TABLE IF NOT EXISTS ip_status (ip TEXT PRIMARY KEY, status INTEGER NOT NULL, expiry INTEGER)",
         [],
@@ -140,7 +144,11 @@ fn load_ip_status() -> usize {
         }
     };
     let rows = match stmt.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, Option<i64>>(2)?))
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, Option<i64>>(2)?,
+        ))
     }) {
         Ok(r) => r,
         Err(e) => {
@@ -312,7 +320,23 @@ async fn handle_client(mut client_stream: TcpStream) {
     };
     buf.truncate(n);
 
-    let (server_address, next_state, client_protocol) = match decode_handshake_packet_ext(&buf) {
+    let handshake_capture =
+        match limbo::capture_handshake(&mut client_stream, buf, Duration::from_secs(5)).await {
+            Ok(capture) => capture,
+            Err(err) => {
+                log_error!(
+                    "Failed to capture complete handshake from {}: {}",
+                    src_ip,
+                    err
+                );
+                let _ = client_stream.shutdown().await;
+                return;
+            }
+        };
+
+    let (server_address, next_state, client_protocol) = match decode_handshake_packet_ext(
+        handshake_capture.buffer(),
+    ) {
         Ok(res) => res,
         Err(e) => {
             let err_msg = format!(
@@ -359,14 +383,62 @@ async fn handle_client(mut client_stream: TcpStream) {
             if let Some(redirection_cfg) = resolve(&server_address) {
                 let redirection_cfg = Arc::new(redirection_cfg);
                 if check_connection_limit(&server_address, src_ip, &redirection_cfg) {
+                    let initial_buffer = if LIMBO_ENABLED.load(Ordering::Relaxed) {
+                        let handshake_timeout = Duration::from_millis(
+                            LIMBO_VERIFICATION_TIMEOUT_MS.load(Ordering::Relaxed),
+                        );
+                        let hold_duration =
+                            Duration::from_millis(LIMBO_HOLD_DURATION_MS.load(Ordering::Relaxed));
+                        match verify_with_limbo(
+                            &mut client_stream,
+                            handshake_capture,
+                            client_protocol,
+                            handshake_timeout,
+                            hold_duration,
+                            &server_address,
+                            src_ip,
+                        )
+                        .await
+                        {
+                            Ok(buffer) => buffer,
+                            Err(err) => {
+                                log_error!(
+                                    "Limbo verification failed for {} from {}: {}",
+                                    server_address,
+                                    src_ip,
+                                    err
+                                );
+                                let _ = client_stream.shutdown().await;
+                                return;
+                            }
+                        }
+                    } else {
+                        log_debug!(
+                            "Limbo verification disabled, connecting {} from {} directly to target",
+                            server_address,
+                            src_ip
+                        );
+                        handshake_capture.into_buffer()
+                    };
                     let proxy_to = SocketAddr::new(redirection_cfg.ip.into(), redirection_cfg.port);
-                    match timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS), TcpStream::connect(proxy_to)).await {
+                    match timeout(
+                        Duration::from_secs(CONNECT_TIMEOUT_SECS),
+                        TcpStream::connect(proxy_to),
+                    )
+                    .await
+                    {
                         Ok(Ok(mut target_stream)) => {
                             if let Err(e) = target_stream.set_nodelay(true) {
                                 log_error!("Failed to disable Nagle on target: {}", e);
                             }
-                            if let (Ok(src_addr), Ok(dst_addr)) = (client_stream.peer_addr(), target_stream.peer_addr()) {
-                                let new_buf = encapsulate_with_proxy_protocol(src_addr, dst_addr, &buf);
+                            if let (Ok(src_addr), Ok(dst_addr)) =
+                                (client_stream.peer_addr(), target_stream.peer_addr())
+                            {
+                                let new_buf = encapsulate_with_proxy_protocol(
+                                    src_addr,
+                                    dst_addr,
+                                    &initial_buffer,
+                                );
                                 send_initial_buffer_to_target(&new_buf, &mut target_stream).await;
                             }
                             let (client_read, client_write) = client_stream.into_split();
@@ -411,7 +483,10 @@ async fn handle_client(mut client_stream: TcpStream) {
                             let _ = client_stream.shutdown().await;
                         }
                         Err(_) => {
-                            log_error!("Timeout connecting to target server for {}", server_address);
+                            log_error!(
+                                "Timeout connecting to target server for {}",
+                                server_address
+                            );
                             let _ = client_stream.shutdown().await;
                         }
                     }
@@ -656,6 +731,46 @@ fn record_ping(ip: IpAddr) {
             status: 2,
             expiry: None,
         });
+}
+
+// ===========================================
+// Limbo Verification Helpers
+// ===========================================
+async fn verify_with_limbo(
+    client_stream: &mut TcpStream,
+    handshake_capture: HandshakeCapture,
+    client_protocol: u32,
+    handshake_timeout: Duration,
+    hold_duration: Duration,
+    domain: &str,
+    src_ip: IpAddr,
+) -> io::Result<Vec<u8>> {
+    log_debug!(
+        "Starting in-process limbo verification for {} from {} (hold {} ms)",
+        domain,
+        src_ip,
+        hold_duration.as_millis()
+    );
+
+    match limbo::verify_client_stream(
+        client_stream,
+        handshake_capture,
+        client_protocol,
+        handshake_timeout,
+        hold_duration,
+    )
+    .await
+    {
+        Ok(buffer) => {
+            log_debug!(
+                "Limbo verification completed for {} from {}",
+                domain,
+                src_ip
+            );
+            Ok(buffer)
+        }
+        Err(err) => Err(err),
+    }
 }
 
 // ===========================================

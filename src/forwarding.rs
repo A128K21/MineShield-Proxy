@@ -63,8 +63,7 @@ pub(crate) async fn forward_loop<R, W>(
     src_addr: SocketAddr,
     client_to_server: bool,
     tag: &'static str,
-)
-where
+) where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
 {
