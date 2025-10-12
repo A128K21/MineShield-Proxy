@@ -9,7 +9,7 @@ use proxy_protocol::{
     ProxyHeader,
 };
 use std::io::{self, Read, Write};
-use std::net::{Ipv4Addr, SocketAddr, TcpStream};
+use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::time::{Duration, Instant};
 
 // ===========================================
@@ -166,11 +166,21 @@ pub fn read_status_response(stream: &mut TcpStream) -> io::Result<String> {
 /// Pings the target server using a Proxy Protocol v2 header and returns the status JSON.
 pub fn ping_target(
     server_address: &str,
-    ip: Ipv4Addr,
+    host: &str,
     port: u16,
     protocol_version: u32,
 ) -> io::Result<String> {
-    let target_addr = SocketAddr::new(ip.into(), port);
+    let mut addrs = (host, port)
+        .to_socket_addrs()
+        .map_err(|err| io::Error::new(io::ErrorKind::AddrNotAvailable, err))?;
+    let target_addr = addrs
+        .find(|addr| matches!(addr, SocketAddr::V4(_)))
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::AddrNotAvailable,
+                format!("No IPv4 address found for {host}"),
+            )
+        })?;
     // Connect with a 1-second timeout
     let mut stream = TcpStream::connect_timeout(&target_addr, Duration::from_secs(1))?;
     stream.set_nodelay(true)?;
@@ -222,14 +232,14 @@ pub fn background_pinger() {
                 .collect();
 
         for (domain, redirection_cfg) in redirection_map {
-            // Retrieve target IP and port from the configuration.
-            let ip = redirection_cfg.ip;
+            // Retrieve target host and port from the configuration.
+            let host = redirection_cfg.host.clone();
             let port = redirection_cfg.port;
 
             // Use protocol version 754 (e.g., for Minecraft 1.16.4+)
             let protocol_version = 754;
 
-            match ping_target(&domain, ip, port, protocol_version) {
+            match ping_target(&domain, &host, port, protocol_version) {
                 Ok(status_json) => {
                     info!("Ping successful for '{}'", domain);
                     // Update the JSON status in the cache.
