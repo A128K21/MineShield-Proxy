@@ -1,12 +1,12 @@
 use dashmap::DashMap;
 use lazy_static::lazy_static;
-use log::error;
+use log::{error, warn};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, ToSocketAddrs};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 
 // ---------- Global locks and references ----------
@@ -30,6 +30,12 @@ lazy_static! {
 
 /// Debug flag read from the config.
 pub static DEBUG: AtomicBool = AtomicBool::new(false);
+/// Whether the embedded limbo server should be started.
+pub static LIMBO_ENABLED: AtomicBool = AtomicBool::new(true);
+/// Timeout (in milliseconds) to wait for the client to finish the login start phase while in limbo.
+pub static LIMBO_VERIFICATION_TIMEOUT_MS: AtomicU64 = AtomicU64::new(5000);
+/// Duration (in milliseconds) to keep a client in limbo before connecting them to the target server.
+pub static LIMBO_HOLD_DURATION_MS: AtomicU64 = AtomicU64::new(5000);
 
 // ---------- Data structures ----------
 
@@ -50,8 +56,34 @@ pub struct Config {
     /// Debug flag.
     #[serde(default)]
     pub debug: bool,
+    /// Embedded limbo server configuration.
+    #[serde(default)]
+    pub limbo: LimboConfig,
     /// List of per‑domain redirections
     pub redirections: Vec<Redirection>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct LimboConfig {
+    pub enabled: bool,
+    #[serde(default, rename = "bind-address")]
+    pub bind_address: Option<String>,
+    #[serde(rename = "verification-timeout-ms")]
+    pub verification_timeout_ms: u64,
+    #[serde(rename = "hold-duration-ms")]
+    pub hold_duration_ms: u64,
+}
+
+impl Default for LimboConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            bind_address: None,
+            verification_timeout_ms: default_limbo_timeout_ms(),
+            hold_duration_ms: default_limbo_hold_ms(),
+        }
+    }
 }
 
 /// The new Redirection definition from your config
@@ -102,6 +134,14 @@ impl Default for PrometheusExporterConfig {
 
 fn default_proxy_threads() -> usize {
     4
+}
+
+fn default_limbo_timeout_ms() -> u64 {
+    5000
+}
+
+fn default_limbo_hold_ms() -> u64 {
+    5000
 }
 
 // ---------- Helpers to load config ----------
@@ -199,7 +239,18 @@ pub fn update_proxies_from_config(config_path: &str) {
     // 5) Update debug flag
     DEBUG.store(config.debug, Ordering::Relaxed);
 
-    // 6) Parse and store redirections in a map
+    // 6) Update limbo configuration
+    LIMBO_ENABLED.store(config.limbo.enabled, Ordering::Relaxed);
+    if let Some(addr) = config.limbo.bind_address.as_ref() {
+        warn!(
+            "'limbo.bind-address' is deprecated and ignored. Remove it from the configuration (current value: {}).",
+            addr
+        );
+    }
+    LIMBO_VERIFICATION_TIMEOUT_MS.store(config.limbo.verification_timeout_ms, Ordering::Relaxed);
+    LIMBO_HOLD_DURATION_MS.store(config.limbo.hold_duration_ms, Ordering::Relaxed);
+
+    // 7) Parse and store redirections in a map
     let mut new_map = HashMap::new();
     for rd in config.redirections {
         match parse_target(&rd.target) {
@@ -250,6 +301,12 @@ prometheus_exporter:
 
 # Debug messages for proxy development
 debug: false
+
+# Embedded limbo verification configuration
+limbo:
+  enabled: true
+  verification-timeout-ms: 5000
+  hold-duration-ms: 5000
 
 # Where should we route incoming connections?
 redirections:
