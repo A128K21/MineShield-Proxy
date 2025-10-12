@@ -17,7 +17,7 @@ use std::sync::atomic::Ordering;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{lookup_host, TcpListener, TcpStream};
 use tokio::time::timeout;
 // Additional dependency for concurrent maps
 use dashmap::DashMap;
@@ -88,6 +88,18 @@ const CONNECT_TIMEOUT_SECS: u64 = 5;
 
 // SQLite database file to persist IP status between restarts
 const IP_STATUS_DB: &str = "ip_status.sqlite";
+
+async fn resolve_backend_socket(cfg: &RedirectionConfig) -> io::Result<SocketAddr> {
+    let mut candidates = lookup_host((cfg.host.as_str(), cfg.port)).await?;
+    candidates
+        .find(|addr| matches!(addr, SocketAddr::V4(_)))
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::AddrNotAvailable,
+                format!("No IPv4 address found for {}", cfg.host),
+            )
+        })
+}
 
 fn save_ip_status() -> io::Result<()> {
     let mut conn =
@@ -420,7 +432,29 @@ async fn handle_client(mut client_stream: TcpStream) {
                         );
                         handshake_capture.into_buffer()
                     };
-                    let proxy_to = SocketAddr::new(redirection_cfg.ip.into(), redirection_cfg.port);
+                    let proxy_to = match resolve_backend_socket(&redirection_cfg).await {
+                        Ok(addr) => {
+                            log_debug!(
+                                "Resolved backend {}:{} to {}",
+                                redirection_cfg.host,
+                                redirection_cfg.port,
+                                addr
+                            );
+                            addr
+                        }
+                        Err(err) => {
+                            log_error!(
+                                "Failed to resolve backend {}:{} for {}: {}",
+                                redirection_cfg.host,
+                                redirection_cfg.port,
+                                server_address,
+                                err
+                            );
+                            let _ = client_stream.shutdown().await;
+                            return;
+                        }
+                    };
+
                     match timeout(
                         Duration::from_secs(CONNECT_TIMEOUT_SECS),
                         TcpStream::connect(proxy_to),
@@ -428,6 +462,13 @@ async fn handle_client(mut client_stream: TcpStream) {
                     .await
                     {
                         Ok(Ok(mut target_stream)) => {
+                            log_debug!(
+                                "Established connection from {} to backend {}:{} via {}",
+                                src_ip,
+                                redirection_cfg.host,
+                                redirection_cfg.port,
+                                proxy_to
+                            );
                             if let Err(e) = target_stream.set_nodelay(true) {
                                 log_error!("Failed to disable Nagle on target: {}", e);
                             }
@@ -476,7 +517,9 @@ async fn handle_client(mut client_stream: TcpStream) {
                         }
                         Ok(Err(e)) => {
                             log_error!(
-                                "Error connecting to target server for {}: {}",
+                                "Error connecting to target {}:{} for {}: {}",
+                                redirection_cfg.host,
+                                redirection_cfg.port,
                                 server_address,
                                 e
                             );
@@ -484,7 +527,9 @@ async fn handle_client(mut client_stream: TcpStream) {
                         }
                         Err(_) => {
                             log_error!(
-                                "Timeout connecting to target server for {}",
+                                "Timeout connecting to target {}:{} for {}",
+                                redirection_cfg.host,
+                                redirection_cfg.port,
                                 server_address
                             );
                             let _ = client_stream.shutdown().await;

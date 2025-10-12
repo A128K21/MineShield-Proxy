@@ -5,7 +5,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Write};
-use std::net::{Ipv4Addr, SocketAddr, ToSocketAddrs};
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 
@@ -105,7 +105,7 @@ pub struct Redirection {
 /// This is what we'll store per domain internally
 #[derive(Clone, Debug)]
 pub struct RedirectionConfig {
-    pub ip: Ipv4Addr,
+    pub host: String,
     pub port: u16,
     pub max_connections_per_second: usize,
     pub max_packet_per_second: usize,
@@ -147,24 +147,7 @@ fn default_limbo_hold_ms() -> u64 {
 // ---------- Helpers to load config ----------
 
 /// Resolves a host (like "127.0.0.1" or "example.com") to an `Ipv4Addr`.
-fn convert_to_ipv4(addr: &str) -> Result<Ipv4Addr, String> {
-    // If it's already an IPv4 string, parse and return it.
-    if let Ok(ip) = addr.parse::<Ipv4Addr>() {
-        return Ok(ip);
-    }
-    // Otherwise, try DNS resolution.
-    let socket_addrs = (addr, 0)
-        .to_socket_addrs()
-        .map_err(|e| format!("Failed to resolve '{}': {}", addr, e))?;
-    for socket_addr in socket_addrs {
-        if let std::net::IpAddr::V4(ipv4_addr) = socket_addr.ip() {
-            return Ok(ipv4_addr);
-        }
-    }
-    Err(format!("No IPv4 address found for '{}'", addr))
-}
-
-fn parse_target(target: &str) -> Result<(Ipv4Addr, u16), String> {
+fn parse_target(target: &str) -> Result<(String, u16), String> {
     let parts: Vec<&str> = target.split(':').collect();
     if parts.len() != 2 {
         return Err("Invalid target format (expected host:port)".to_string());
@@ -173,8 +156,10 @@ fn parse_target(target: &str) -> Result<(Ipv4Addr, u16), String> {
     let port: u16 = parts[1]
         .parse()
         .map_err(|_| "Invalid port in target".to_string())?;
-    let ipv4 = convert_to_ipv4(host)?;
-    Ok((ipv4, port))
+    if host.trim().is_empty() {
+        return Err("Target host may not be empty".to_string());
+    }
+    Ok((host.trim().to_string(), port))
 }
 
 /// Loads YAML from `config_path` and updates global settings.
@@ -254,9 +239,9 @@ pub fn update_proxies_from_config(config_path: &str) {
     let mut new_map = HashMap::new();
     for rd in config.redirections {
         match parse_target(&rd.target) {
-            Ok((ip, port)) => {
+            Ok((host, port)) => {
                 let rcfg = RedirectionConfig {
-                    ip,
+                    host,
                     port,
                     max_connections_per_second: rd.max_connections_per_second,
                     max_packet_per_second: rd.max_packet_per_second,
