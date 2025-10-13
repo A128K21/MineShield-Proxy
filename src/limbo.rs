@@ -1,4 +1,4 @@
-use log::{debug, trace};
+use log::{debug, trace, warn};
 use minecraft_protocol::prelude::{BinaryReader, BinaryReaderError, VarInt};
 use net::packet_stream::{PacketStream, PacketStreamError};
 use net::raw_packet::RawPacket;
@@ -10,7 +10,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 use tokio::time::{sleep, Duration, Instant};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct HandshakeCapture {
     buffer: Vec<u8>,
     header_len: usize,
@@ -72,6 +72,7 @@ pub async fn capture_handshake(
         initial.extend_from_slice(&buf[..read]);
     }
 
+    trace!("Handshake capture finished with {} bytes", initial.len());
     Ok(HandshakeCapture {
         buffer: initial,
         header_len,
@@ -87,9 +88,10 @@ pub async fn verify_client_stream(
     hold_duration: Duration,
 ) -> io::Result<Vec<u8>> {
     debug!(
-        "Starting PicoLimbo stream verification (protocol {}, hold {} ms)",
+        "Starting PicoLimbo stream verification (protocol {}, hold {} ms, timeout {} ms)",
         client_protocol,
-        hold_duration.as_millis()
+        hold_duration.as_millis(),
+        handshake_timeout.as_millis()
     );
 
     let (mut buffer, header_len, packet_len) = capture.into_parts();
@@ -100,6 +102,14 @@ pub async fn verify_client_stream(
         Vec::new()
     };
     buffer.truncate(handshake_end);
+
+    debug!(
+        "Handshake consists of {} bytes (header {} + body {}), trailing {} bytes captured",
+        handshake_end,
+        header_len,
+        packet_len,
+        trailing.len()
+    );
 
     let wrapped = BufferedStream::new(stream, std::mem::take(&mut trailing));
     let mut packet_stream = PacketStream::new(wrapped);
@@ -121,6 +131,10 @@ async fn wait_for_login_start(
     capture: &mut Vec<u8>,
 ) -> io::Result<()> {
     let deadline = Instant::now() + timeout;
+    debug!(
+        "Waiting for client login start packet with timeout {} ms",
+        timeout.as_millis()
+    );
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
@@ -131,12 +145,23 @@ async fn wait_for_login_start(
         }
         let packet = match tokio::time::timeout(remaining, packet_stream.read_packet()).await {
             Ok(Ok(packet)) => packet,
-            Ok(Err(err)) => return Err(map_packet_error(err)),
+            Ok(Err(err)) => {
+                let mapped = map_packet_error(err);
+                debug!(
+                    "Failed to read login packet while waiting for start: {}",
+                    mapped
+                );
+                return Err(mapped);
+            }
             Err(_) => {
+                debug!(
+                    "Timed out waiting for login start packet ({} ms elapsed)",
+                    timeout.as_millis()
+                );
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
                     "Timed out waiting for login start during limbo verification",
-                ))
+                ));
             }
         };
 
@@ -145,8 +170,16 @@ async fn wait_for_login_start(
         let packet_id = read_packet_id(packet.bytes())?;
         trace!("Captured login packet id={} during verification", packet_id);
         if packet_id == 0 {
+            debug!(
+                "Login start packet received after {} captured bytes",
+                capture.len()
+            );
             return Ok(());
         }
+        debug!(
+            "Received non-login-start packet id={} while waiting",
+            packet_id
+        );
     }
 }
 
@@ -157,18 +190,27 @@ async fn hold_connection(
 ) -> io::Result<()> {
     let hold_sleep = sleep(hold);
     tokio::pin!(hold_sleep);
+    debug!(
+        "Holding client in limbo for {} ms while capturing additional packets",
+        hold.as_millis()
+    );
     loop {
         tokio::select! {
             _ = &mut hold_sleep => {
+                debug!("Hold duration elapsed; releasing client from limbo hold");
                 return Ok(());
             }
             read_res = packet_stream.read_packet() => {
                 match read_res {
                     Ok(packet) => {
+                        let packet_len = packet.bytes().len();
                         append_raw_packet(capture, &packet)?;
+                        trace!("Captured additional packet during hold ({} bytes)", packet_len);
                     }
                     Err(err) => {
-                        return Err(map_packet_error(err));
+                        let mapped = map_packet_error(err);
+                        debug!("Error while holding client in limbo: {}", mapped);
+                        return Err(mapped);
                     }
                 }
             }
@@ -188,6 +230,11 @@ fn append_raw_packet(buffer: &mut Vec<u8>, packet: &RawPacket) -> io::Result<()>
     let payload = packet.bytes();
     let length = payload.len();
     let mut varint_buf = encode_varint(length);
+    trace!(
+        "Appending raw packet of {} bytes (capture now {} bytes)",
+        length,
+        buffer.len()
+    );
     buffer.append(&mut varint_buf);
     buffer.extend_from_slice(payload);
     Ok(())
@@ -290,7 +337,10 @@ impl Unpin for BufferedStream<'_> {}
 fn map_packet_error(err: PacketStreamError) -> io::Error {
     match err {
         PacketStreamError::Io(io_err) => io_err,
-        other => io::Error::new(io::ErrorKind::InvalidData, other),
+        other => {
+            warn!("Mapping PacketStream error to I/O error: {}", other);
+            io::Error::new(io::ErrorKind::InvalidData, other)
+        }
     }
 }
 

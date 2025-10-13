@@ -805,6 +805,7 @@ async fn verify_with_limbo(
     domain: &str,
     src_ip: IpAddr,
 ) -> io::Result<Vec<u8>> {
+    let fallback_capture = handshake_capture.clone();
     log_debug!(
         "Starting in-process limbo verification for {} from {} (hold {} ms)",
         domain,
@@ -829,7 +830,26 @@ async fn verify_with_limbo(
             );
             Ok(buffer)
         }
-        Err(err) => Err(err),
+        Err(err) => {
+            log_debug!(
+                "Limbo verification error for {} from {}: {}",
+                domain,
+                src_ip,
+                err
+            );
+
+            match err.kind() {
+                io::ErrorKind::TimedOut | io::ErrorKind::InvalidData => {
+                    log_debug!(
+                        "Falling back to direct handshake forwarding for {} from {} after limbo error",
+                        domain,
+                        src_ip
+                    );
+                    Ok(fallback_capture.into_buffer())
+                }
+                _ => Err(err),
+            }
+        }
     }
 }
 
