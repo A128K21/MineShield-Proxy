@@ -2,7 +2,7 @@ use dashmap::DashMap;
 use lazy_static::lazy_static;
 use log::error;
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, ToSocketAddrs};
@@ -200,8 +200,11 @@ pub fn update_proxies_from_config(config_path: &str) {
     DEBUG.store(config.debug, Ordering::Relaxed);
 
     // 6) Parse and store redirections in a map
-    let mut new_map = HashMap::new();
+    let mut domains_in_config = HashSet::new();
     for rd in config.redirections {
+        let domain_key = rd.incoming_domain.to_ascii_lowercase();
+        domains_in_config.insert(domain_key.clone());
+
         match parse_target(&rd.target) {
             Ok((ip, port)) => {
                 let rcfg = RedirectionConfig {
@@ -211,17 +214,20 @@ pub fn update_proxies_from_config(config_path: &str) {
                     max_packet_per_second: rd.max_packet_per_second,
                     max_ping_response_per_second: rd.max_ping_response_per_second,
                 };
-                new_map.insert(rd.incoming_domain.to_ascii_lowercase(), rcfg);
+                REDIRECTION_MAP.insert(domain_key, rcfg);
             }
             Err(e) => {
                 error!("Error parsing target '{}': {}", rd.target, e);
+                if let Some(mut existing) = REDIRECTION_MAP.get_mut(&domain_key) {
+                    existing.max_connections_per_second = rd.max_connections_per_second;
+                    existing.max_packet_per_second = rd.max_packet_per_second;
+                    existing.max_ping_response_per_second = rd.max_ping_response_per_second;
+                }
             }
         }
     }
-    REDIRECTION_MAP.clear();
-    for (k, v) in new_map {
-        REDIRECTION_MAP.insert(k, v);
-    }
+
+    REDIRECTION_MAP.retain(|k, _| domains_in_config.contains(k));
 }
 
 /// Shortcut: updates from `config.yml`
@@ -273,4 +279,121 @@ redirections:
 
 "#
     .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lazy_static::lazy_static;
+    use std::fs;
+    use std::net::Ipv4Addr;
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+    use tempfile::NamedTempFile;
+
+    lazy_static! {
+        static ref CONFIG_TEST_GUARD: Mutex<()> = Mutex::new(());
+    }
+
+    fn write_config(file: &PathBuf, contents: &str) {
+        fs::write(file, contents).expect("failed to write temp config");
+    }
+
+    fn basic_config(target: &str, max_conn: usize) -> String {
+        format!(
+            r#"bind-address: "127.0.0.1:25565"
+proxy_threads: 4
+prometheus_exporter:
+  enabled: false
+  bind-address: "0.0.0.0:9100"
+debug: false
+redirections:
+  - incoming_domain: "example.com"
+    target: "{}"
+    max_connections_per_second: {}
+    max_packet_per_second: 0
+    max_ping_response_per_second: 0
+"#,
+            target, max_conn
+        )
+    }
+
+    #[test]
+    fn retains_previous_mapping_when_resolution_fails() {
+        let _guard = CONFIG_TEST_GUARD.lock().unwrap();
+        REDIRECTION_MAP.clear();
+
+        let file = NamedTempFile::new().expect("failed to create temp file");
+        let path = file.path().to_path_buf();
+
+        write_config(&path, &basic_config("127.0.0.1:25565", 1));
+        update_proxies_from_config(path.to_str().unwrap());
+
+        {
+            let entry = REDIRECTION_MAP
+                .get("example.com")
+                .expect("initial mapping missing");
+            assert_eq!(entry.ip, Ipv4Addr::new(127, 0, 0, 1));
+            assert_eq!(entry.port, 25565);
+            assert_eq!(entry.max_connections_per_second, 1);
+        }
+
+        write_config(&path, &basic_config("does.not.resolve.invalid:25565", 3));
+        update_proxies_from_config(path.to_str().unwrap());
+
+        {
+            let entry = REDIRECTION_MAP
+                .get("example.com")
+                .expect("mapping should persist after resolution failure");
+            assert_eq!(entry.ip, Ipv4Addr::new(127, 0, 0, 1));
+            assert_eq!(entry.port, 25565);
+            assert_eq!(entry.max_connections_per_second, 3);
+        }
+
+        REDIRECTION_MAP.clear();
+    }
+
+    #[test]
+    fn removes_domains_missing_from_config() {
+        let _guard = CONFIG_TEST_GUARD.lock().unwrap();
+        REDIRECTION_MAP.clear();
+
+        let file = NamedTempFile::new().expect("failed to create temp file");
+        let path = file.path().to_path_buf();
+
+        let initial = r#"bind-address: "127.0.0.1:25565"
+proxy_threads: 4
+prometheus_exporter:
+  enabled: false
+  bind-address: "0.0.0.0:9100"
+debug: false
+redirections:
+  - incoming_domain: "example.com"
+    target: "127.0.0.1:25565"
+  - incoming_domain: "other.example"
+    target: "127.0.0.1:25566"
+"#;
+        write_config(&path, initial);
+        update_proxies_from_config(path.to_str().unwrap());
+        assert!(REDIRECTION_MAP.contains_key("example.com"));
+        assert!(REDIRECTION_MAP.contains_key("other.example"));
+
+        let updated = r#"bind-address: "127.0.0.1:25565"
+proxy_threads: 4
+prometheus_exporter:
+  enabled: false
+  bind-address: "0.0.0.0:9100"
+debug: false
+redirections:
+  - incoming_domain: "example.com"
+    target: "127.0.0.1:25565"
+"#;
+        write_config(&path, updated);
+        update_proxies_from_config(path.to_str().unwrap());
+
+        assert!(REDIRECTION_MAP.contains_key("example.com"));
+        assert!(!REDIRECTION_MAP.contains_key("other.example"));
+
+        REDIRECTION_MAP.clear();
+    }
 }
