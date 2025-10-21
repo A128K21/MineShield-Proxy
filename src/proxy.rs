@@ -27,7 +27,7 @@ use crate::{forwarding, send_ntfy_notification, target_pinger};
 use std::sync::Arc;
 
 // ===========================================
-// Helper Macros for Conditional Logging
+// Helper Macros for Conditional Logging asd
 // ===========================================
 macro_rules! log_error {
     ($($arg:tt)*) => {{
