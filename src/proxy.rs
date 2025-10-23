@@ -8,9 +8,9 @@ use proxy_protocol::{
     version2::{ProxyAddresses, ProxyCommand, ProxyTransportProtocol},
     ProxyHeader,
 };
+use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use rusqlite::{params, Connection};
 use std::io::{self, Cursor, Read};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::Ordering;
@@ -86,8 +86,8 @@ const CONNECT_TIMEOUT_SECS: u64 = 5;
 const IP_STATUS_DB: &str = "ip_status.sqlite";
 
 fn save_ip_status() -> io::Result<()> {
-    let mut conn = Connection::open(IP_STATUS_DB)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    let mut conn =
+        Connection::open(IP_STATUS_DB).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
     conn.execute(
         "CREATE TABLE IF NOT EXISTS ip_status (ip TEXT PRIMARY KEY, status INTEGER NOT NULL, expiry INTEGER)",
         [],
@@ -140,7 +140,11 @@ fn load_ip_status() -> usize {
         }
     };
     let rows = match stmt.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, Option<i64>>(2)?))
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, Option<i64>>(2)?,
+        ))
     }) {
         Ok(r) => r,
         Err(e) => {
@@ -360,13 +364,21 @@ async fn handle_client(mut client_stream: TcpStream) {
                 let redirection_cfg = Arc::new(redirection_cfg);
                 if check_connection_limit(&server_address, src_ip, &redirection_cfg) {
                     let proxy_to = SocketAddr::new(redirection_cfg.ip.into(), redirection_cfg.port);
-                    match timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS), TcpStream::connect(proxy_to)).await {
+                    match timeout(
+                        Duration::from_secs(CONNECT_TIMEOUT_SECS),
+                        TcpStream::connect(proxy_to),
+                    )
+                    .await
+                    {
                         Ok(Ok(mut target_stream)) => {
                             if let Err(e) = target_stream.set_nodelay(true) {
                                 log_error!("Failed to disable Nagle on target: {}", e);
                             }
-                            if let (Ok(src_addr), Ok(dst_addr)) = (client_stream.peer_addr(), target_stream.peer_addr()) {
-                                let new_buf = encapsulate_with_proxy_protocol(src_addr, dst_addr, &buf);
+                            if let (Ok(src_addr), Ok(dst_addr)) =
+                                (client_stream.peer_addr(), target_stream.peer_addr())
+                            {
+                                let new_buf =
+                                    encapsulate_with_proxy_protocol(src_addr, dst_addr, &buf);
                                 send_initial_buffer_to_target(&new_buf, &mut target_stream).await;
                             }
                             let (client_read, client_write) = client_stream.into_split();
@@ -411,7 +423,10 @@ async fn handle_client(mut client_stream: TcpStream) {
                             let _ = client_stream.shutdown().await;
                         }
                         Err(_) => {
-                            log_error!("Timeout connecting to target server for {}", server_address);
+                            log_error!(
+                                "Timeout connecting to target server for {}",
+                                server_address
+                            );
                             let _ = client_stream.shutdown().await;
                         }
                     }
